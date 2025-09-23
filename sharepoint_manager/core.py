@@ -81,6 +81,8 @@ class SharepointManager:
         >>> )
         """
 
+        self._session: requests.Session = requests.Session()
+
         self.url: str = sharepoint_site_url
         self.tenant_url: str = sharepoint_site_url.split("/sites")[0]
         self.tenant_id: str = self._get_tenant_id()
@@ -99,9 +101,6 @@ class SharepointManager:
 
         self.folder: SPFolder = self._get_folder("")
         self.users: dict[str, Any] = {}
-
-        # HTTP session for connection pooling
-        self._session: requests.Session = requests.Session()
 
     # ----------------------------------------------------------
     # Support Methods
