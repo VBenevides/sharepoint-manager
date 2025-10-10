@@ -6,7 +6,8 @@ Module used to interact with sharepoint sites using an approach similar to file 
 # Imports
 # ---------------------------------------------------------------------- #
 
-from typing import Any, Iterator
+from typing import Any
+from collections.abc import Iterator
 import requests
 import os
 import re
@@ -84,11 +85,11 @@ class SharepointManager:
         self._session: requests.Session = requests.Session()
 
         self.url: str = sharepoint_site_url
-        self.tenant_url: str = sharepoint_site_url.split("/sites")[0]
+        self.tenant_url: str = sharepoint_site_url.split("/sites", maxsplit=1)[0]
         self.tenant_id: str = self._get_tenant_id()
 
         # These variables shouldn't be changed manually
-        self.site_name: str = self.url.split("/")[-1]
+        self.site_name: str = self.url.split("/sites/", maxsplit=1)[-1]
         self.cca: ConfidentialClientApplication = ConfidentialClientApplication(
             client_id=credentials.client_id,
             client_credential=credentials.client_secret,
@@ -109,7 +110,7 @@ class SharepointManager:
     def _get_site_id(self) -> str:
         parts = [x for x in self.url.split("/") if len(x) > 0]
         tenant = [x for x in parts if "share" in x.lower() or ".com" in x.lower()][0]
-        site = parts[-1]
+        site = self.url.split("/sites/")[-1]
         if "/sites/" not in site:
             site = f"/sites/{site}"
         url = f"https://graph.microsoft.com/v1.0/sites/{tenant}:{site}"
