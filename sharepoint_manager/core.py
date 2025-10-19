@@ -12,8 +12,8 @@ import requests
 import os
 import re
 import time
+import logging
 
-from automation_logging import info_else, error_else
 from msal import ConfidentialClientApplication
 
 from .decorators import retry_if_not_exception, retry
@@ -314,7 +314,7 @@ class SharepointManager:
         >>> try:
         >>>     manager.set_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", create_folder = False)
         >>> except SPFolderNotFound:
-        >>>     info_else("Folder does not exist inside Sharepoint!")
+        >>>     logging.info("Folder does not exist inside Sharepoint!")
         >>> manager.set_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", create_folder = True) # Creates folder
         """
 
@@ -454,7 +454,7 @@ class SharepointManager:
         file_size_b = os.path.getsize(local_file_path)
         file_size_mb = file_size_b / (1024 * 1024)
 
-        info_else(f"Uploading file {file_name} ({file_size_mb:.1f} MB)")
+        logging.info(f"Uploading file {file_name} ({file_size_mb:.1f} MB)")
 
         with open(local_file_path, "rb") as file:
             site_id = self._site_id
@@ -497,11 +497,11 @@ class SharepointManager:
                         except Exception as e:
                             time.sleep(1)
                             if attempt >= 2:
-                                error_else(f"Error uploading chunk: {e}")
+                                logging.error(f"Error uploading chunk: {e}")
                                 raise e
 
                     start_byte += len(chunk)
-                    info_else(
+                    logging.info(
                         f"Uploaded {start_byte / (1024 * 1024):.1f} MiB out of {file_size_b / (1024 * 1024):.1f}"
                     )
             finally:
@@ -510,7 +510,7 @@ class SharepointManager:
                 except Exception:
                     pass
 
-        info_else("Upload completed.")
+        logging.info("Upload completed.")
 
     def upload_folder(
         self, local_folder_path: str, sp_relative_folder_path: str | None = None
@@ -555,7 +555,7 @@ class SharepointManager:
         sp_folder_path = f"{sp_relative_url}/{new_folder_name}"
         if len(sp_folder_path) > 0 and sp_folder_path[0] == "/":
             sp_folder_path = sp_folder_path[1:]
-        info_else(f"Uploading folder: {self.folder.name}")
+        logging.info(f"Uploading folder: {self.folder.name}")
         _ = self.set_folder(sp_folder_path, create_folder=True)
 
         list_elements = os.listdir(local_folder_path)
@@ -631,7 +631,7 @@ class SharepointManager:
         file_size_bytes = int(file_obj.size)
         file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
         download_url = file_obj.download_url
-        info_else(f"Downloading file {file_obj.name} ({file_size_mbytes} MB)")
+        logging.info(f"Downloading file {file_obj.name} ({file_size_mbytes} MB)")
 
         chunk_size = 4 * 1024 * 1024
         downloaded_bytes = 0
@@ -643,11 +643,11 @@ class SharepointManager:
                 for chunk in r.iter_content(chunk_size=chunk_size):
                     _ = f.write(chunk)
                     downloaded_bytes += len(chunk)
-                    info_else(
+                    logging.info(
                         f"Downloaded {downloaded_bytes / (1024 * 1024):.1f} MiB out of {file_size_bytes / (1024 * 1024):.1f}"
                     )
 
-        info_else("Download completed.")
+        logging.info("Download completed.")
 
         return file_obj
 
@@ -686,7 +686,7 @@ class SharepointManager:
             _ = self.set_folder(sp_relative_folder_path)
 
         # Create local folder
-        info_else(f"Downloading folder: {self.folder.name}")
+        logging.info(f"Downloading folder: {self.folder.name}")
         cur_folder = self.folder
         cur_folder_download_path = os.path.join(local_download_path, cur_folder.name)
         os.makedirs(cur_folder_download_path, exist_ok=True)
@@ -784,7 +784,7 @@ class SharepointManager:
         >>> try:
         >>>     manager.delete_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", force_delete=False)
         >>> except SPFolderNotEmpty:
-        >>>     info_else("Sharepoint folder is not empty")
+        >>>     logging.info("Sharepoint folder is not empty")
         >>> manager.delete_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", force_delete=True)
         """
 
