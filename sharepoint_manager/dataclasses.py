@@ -11,6 +11,13 @@ class ClientCredential:
 
 
 @dataclass
+class UserDelegatedCredential:
+    client_id: str
+    username: str
+    password: str
+
+
+@dataclass
 class SPObject:
     created_datetime: str
     id: str

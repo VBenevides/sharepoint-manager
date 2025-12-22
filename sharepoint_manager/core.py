@@ -6,23 +6,300 @@ Module used to interact with sharepoint sites using an approach similar to file 
 # Imports
 # ---------------------------------------------------------------------- #
 
-from typing import Any
+from typing import Any, Literal
+import base64
 from collections.abc import Iterator
-import requests
 import os
 import re
 import time
 import logging
+import requests
 
-from msal import ConfidentialClientApplication
+from msal import ConfidentialClientApplication, PublicClientApplication
 
 from .decorators import retry_if_not_exception, retry
-from .dataclasses import ClientCredential, SPFolder, SPFile
+from .dataclasses import ClientCredential, UserDelegatedCredential, SPFolder, SPFile
 from .exceptions import SPFolderNotEmpty, SPFileNotFound, SPFolderNotFound
 from .utils import get_filename, get_names_to_folder
 
 
-class SharepointManager:
+class SharepointManagerBase:
+    """
+    Base class for Sharepoint Manager Classes
+    """
+
+    credentials: ClientCredential | UserDelegatedCredential  # pyright: ignore[reportUninitializedInstanceVariable]
+    ca: ConfidentialClientApplication | PublicClientApplication  # pyright: ignore[reportUninitializedInstanceVariable]
+    _session: requests.Session  # pyright: ignore[reportUninitializedInstanceVariable]
+    tenant_url: str  # pyright: ignore[reportUninitializedInstanceVariable]
+
+    # ----------------------------------------------------------
+    # Support Methods
+    # ----------------------------------------------------------
+
+    def _hdr(self, json_content: bool = False) -> dict[str, Any]:
+        token = self._ensure_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        if json_content:
+            headers["Content-Type"] = "application/json"
+        return headers
+
+    def _get_tenant_id(self) -> str:
+        """Retrieve the tenant ID from the SharePoint tenant URL."""
+
+        r = self._request("HEAD", self.tenant_url, headers={"Authorization": "Bearer"}, timeout=20)
+        hdr = r.headers.get("WWW-Authenticate", "")
+        m = re.search(r'realm="([^"]+)"', hdr)
+        if m:
+            return m.group(1)
+        for item in hdr.split(","):
+            if '="' in item:
+                k, v = item.split("=", 1)
+                v = v.strip()
+                if v.startswith('"') and v.endswith('"'):
+                    v = v[1:-1]
+                if k.strip().lower() == "bearer realm":
+                    return str(v)
+
+        raise RuntimeError("Cannot determine tenant id from WWW-Authenticate header")
+
+    def _ensure_token(self) -> str:
+        if isinstance(self.ca, PublicClientApplication):
+            result = self.ca.acquire_token_by_username_password(
+                username=self.credentials.username,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+                password=self.credentials.password,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+                scopes=["https://graph.microsoft.com/.default"],
+            )
+        else:
+            result = self.ca.acquire_token_for_client(
+                scopes=["https://graph.microsoft.com/.default"]
+            )
+        if not isinstance(result, dict) or "access_token" not in result.keys():
+            error = result
+            if isinstance(result, dict):
+                error = result.get("error_description", result)
+            raise RuntimeError(f"Authentication failed: {error}")
+        return str(result["access_token"])
+
+    # ----------------------------------------------------------
+    # Internal HTTP helpers
+    # ----------------------------------------------------------
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, Any] | None = None,
+        timeout: int | None = 30,
+        json: Any | None = None,
+        data: Any | None = None,
+        params: dict[str, Any] | None = None,
+        stream: bool = False,
+        max_attempts: int = 5,
+    ) -> requests.Response:
+        attempt = 1
+        while True:
+            resp = self._session.request(
+                method=method,
+                url=url,
+                headers=headers,
+                timeout=timeout,
+                json=json,
+                data=data,
+                params=params,
+                stream=stream,
+            )
+            # Handle 429/503 with Retry-After
+            if resp.status_code in (429, 503) and attempt < max_attempts:
+                retry_after = resp.headers.get("Retry-After")
+                delay = None
+                try:
+                    delay = int(retry_after) if retry_after is not None else None
+                except Exception:
+                    delay = None
+                if delay is None:
+                    delay = min(2**attempt, 60)
+                time.sleep(delay)
+                attempt += 1
+                continue
+            return resp
+
+    def _paginate(self, url: str) -> Iterator[dict[str, Any]]:
+        """Yield items across Graph pages following @odata.nextLink."""
+        next_url = url
+        while next_url:
+            r = self._request("GET", next_url, headers=self._hdr(), timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            for item in data.get("value", []):
+                yield item
+            next_url = data.get("@odata.nextLink")
+
+
+class SharepointManagerUrl(SharepointManagerBase):
+    """
+    Provides an interface for interacting with SharePoint files via direct URLs.
+
+    Supports fetching file metadata and downloading files using Microsoft Graph API.
+    """
+
+    def __init__(
+        self,
+        sharepoint_site_url: str,
+        credentials: ClientCredential | UserDelegatedCredential,
+    ) -> None:
+        """
+        Initializes the SharepointManager with a given SharePoint URL and credentials.
+
+        Parameters
+        ----------
+        sharepoint_site_url : str
+            The URL of the SharePoint site. E.g: 'https://{tenant_url}.sharepoint.com/sites/{site_name}'.
+        credentials : ClientCredential
+            Graph API credentials for authentication.
+        document_folder_name : str, optional
+            The name of the document folder in the SharePoint site. Default is "Shared Documents".
+
+            This is vital to guarantee that the class will be able to find the documents in the site.
+        url_only : bool, optional
+            If True, allows the object to be instantiated without site url and documents_folder_name
+            This is useful when dealing with file URLs without the need to connect to a specific site
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        >>> user_cred = ClientCredential("graph_id", "graph_secret") # Don't hardcode passwords
+        >>> manager = SharepointManager(sharepoint_site_url = "https://my_tenant.sharepoint.com/sites/my_site",
+        >>>     credentials = user_cred,
+        >>>     document_folder_name = "Shared Documents",
+        >>> )
+        """
+
+        self._session: requests.Session = requests.Session()
+        self.credentials: ClientCredential | UserDelegatedCredential = credentials
+
+        self.url: str = sharepoint_site_url
+        self.site_separator: Literal["/teams/", "/sites/"] = (
+            "/teams/" if "/teams/" in self.url else "/sites/"
+        )
+        self.tenant_url: str = sharepoint_site_url.split(self.site_separator, maxsplit=1)[0]
+        self.tenant_id: str = self._get_tenant_id()
+
+        if isinstance(credentials, ClientCredential):
+            self.ca = ConfidentialClientApplication(
+                client_id=credentials.client_id,
+                client_credential=credentials.client_secret,
+                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+            )
+        else:
+            self.ca = PublicClientApplication(
+                client_id=credentials.client_id,
+                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+            )
+
+    # ----------------------------------------------------------
+    # Direct URL methods (share URL)
+    # ----------------------------------------------------------
+
+    def get_file_metadata_from_url(self, url: str) -> SPFile:
+        """
+        Retrieve file metadata from a SharePoint file URL.
+
+
+        Parameters
+        ----------
+        url : str
+            The SharePoint file URL.
+
+
+        Returns
+        -------
+        SPFile
+            The file metadata.
+
+        Examples
+        --------
+        >>> manager = SharepointManagerUrl(...)
+        >>> file_metadata = manager.get_file_metadata_from_url(url = "https://tenant.sharepoint.com/...")
+        """
+
+        base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
+        encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
+
+        graph_url = f"https://graph.microsoft.com/v1.0/shares/{encoded_url}/driveItem"
+        headers = self._hdr()
+
+        r = self._request("GET", graph_url, headers=headers, timeout=30)
+        r.raise_for_status()
+        file = SPFile.from_dict(r.json())
+
+        return file
+
+    def download_file_from_url(
+        self,
+        url: str,
+        local_download_path: str,
+        new_filename: str | None = None,
+    ) -> SPFile:
+        """
+        Download a file from SharePoint file URL.
+
+
+        Parameters
+        ----------
+        url : str
+            The SharePoint file URL.
+        local_download_path : str
+            Local folder to download into.
+        new_filename : str, optional
+            If provided, rename the downloaded file.
+
+
+        Returns
+        -------
+        SPFile
+            The downloaded file metadata.
+
+        Examples
+        --------
+        >>> manager = SharepointManagerUrl(...)
+        >>> manager.download_file(url = "https://tenant.sharepoint.com/...", local_download_path = "./Download_Dir")
+        """
+
+        file_obj = self.get_file_metadata_from_url(url)
+
+        local_download_path = os.path.abspath(local_download_path)
+
+        os.makedirs(local_download_path, exist_ok=True)
+
+        file_size_bytes = int(file_obj.size)
+        file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
+        download_url = file_obj.download_url
+        logging.info(f"Downloading file {file_obj.name} ({file_size_mbytes} MB)")
+
+        chunk_size = 4 * 1024 * 1024
+        downloaded_bytes = 0
+
+        filename = file_obj.name if new_filename is None else new_filename
+        with self._request("GET", download_url, stream=True, timeout=None) as r:
+            r.raise_for_status()
+            with open(f"{local_download_path}/{filename}", "wb") as f:
+                for chunk in r.iter_content(chunk_size=chunk_size):
+                    _ = f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    logging.info(
+                        f"Downloaded {downloaded_bytes / (1024 * 1024):.1f} MiB out of {file_size_bytes / (1024 * 1024):.1f}"
+                    )
+
+        logging.info("Download completed.")
+
+        return file_obj
+
+
+class SharepointManager(SharepointManagerBase):
     """
     Provides an interface for interacting with a SharePoint site.
 
@@ -52,7 +329,7 @@ class SharepointManager:
     def __init__(
         self,
         sharepoint_site_url: str,
-        credentials: ClientCredential,
+        credentials: ClientCredential | UserDelegatedCredential,
         document_folder_name: str = "Shared Documents",
     ) -> None:
         """
@@ -83,23 +360,37 @@ class SharepointManager:
         """
 
         self._session: requests.Session = requests.Session()
+        self.credentials: ClientCredential | UserDelegatedCredential = credentials
 
         self.url: str = sharepoint_site_url
-        self.tenant_url: str = sharepoint_site_url.split("/sites", maxsplit=1)[0]
+        self.site_separator: Literal["/teams/", "/sites/"] = (
+            "/teams/" if "/teams/" in self.url else "/sites/"
+        )
+        self.tenant_url: str = sharepoint_site_url.split(self.site_separator, maxsplit=1)[0]
         self.tenant_id: str = self._get_tenant_id()
 
         # These variables shouldn't be changed manually
-        self.site_name: str = self.url.split("/sites/", maxsplit=1)[-1]
-        self.cca: ConfidentialClientApplication = ConfidentialClientApplication(
-            client_id=credentials.client_id,
-            client_credential=credentials.client_secret,
-            authority=f"https://login.microsoftonline.com/{self.tenant_id}",
-        )
+        self.site_name: str = self.url.split(self.site_separator, maxsplit=1)[-1]
+
+        if isinstance(credentials, ClientCredential):
+            self.ca = ConfidentialClientApplication(
+                client_id=credentials.client_id,
+                client_credential=credentials.client_secret,
+                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+            )
+        else:
+            self.ca = PublicClientApplication(
+                client_id=credentials.client_id,
+                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+            )
+
         self.document_folder_name: str = document_folder_name
-        self.relative_path_root: str = f"/sites/{self.site_name}/{document_folder_name}"
+        self.relative_path_root: str = (
+            f"{self.site_separator}{self.site_name}/{document_folder_name}"
+        )
+
         self._site_id: str = self._get_site_id()
         self._drive_id: str = self._get_drive_id()
-
         self.folder: SPFolder = self._get_folder("")
         self.users: dict[str, Any] = {}
 
@@ -110,50 +401,14 @@ class SharepointManager:
     def _get_site_id(self) -> str:
         parts = [x for x in self.url.split("/") if len(x) > 0]
         tenant = [x for x in parts if "share" in x.lower() or ".com" in x.lower()][0]
-        site = self.url.split("/sites/")[-1]
-        if "/sites/" not in site:
-            site = f"/sites/{site}"
+        site = self.url.split(self.site_separator)[-1]
+        if self.site_separator not in site:
+            site = f"{self.site_separator}{site}"
         url = f"https://graph.microsoft.com/v1.0/sites/{tenant}:{site}"
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
         r.raise_for_status()
         self._site_id = r.json()["id"]
         return self._site_id
-
-    def _hdr(self, json_content: bool = False) -> dict[str, Any]:
-        token = self._ensure_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        if json_content:
-            headers["Content-Type"] = "application/json"
-        return headers
-
-    def _get_tenant_id(self) -> str:
-        """Retrieve the tenant ID from the SharePoint tenant URL."""
-
-        r = self._request("HEAD", self.tenant_url, headers={"Authorization": "Bearer"}, timeout=20)
-        hdr = r.headers.get("WWW-Authenticate", "")
-        m = re.search(r'realm="([^"]+)"', hdr)
-        if m:
-            return m.group(1)
-        for item in hdr.split(","):
-            if '="' in item:
-                k, v = item.split("=", 1)
-                v = v.strip()
-                if v.startswith('"') and v.endswith('"'):
-                    v = v[1:-1]
-                if k.strip().lower() == "bearer realm":
-                    return str(v)
-
-        raise RuntimeError("Cannot determine tenant id from WWW-Authenticate header")
-
-    def _ensure_token(self) -> str:
-        # msal already has an internal cache
-        result = self.cca.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-        if not isinstance(result, dict) or "access_token" not in result.keys():
-            error = result
-            if isinstance(result, dict):
-                error = result.get("error_description", result)
-            raise RuntimeError(f"Authentication failed: {error}")
-        return str(result["access_token"])
 
     def _get_drive_id(self) -> str:
         site_id = self._site_id
@@ -182,7 +437,8 @@ class SharepointManager:
         raise RuntimeError("Drive not found for site")
 
     def _get_folder(self, folder_path: str) -> SPFolder:
-        """folder_dict, folder_exists"""
+        """folder_dict"""
+
         site_id = self._site_id
         drive_id = self._drive_id
         if folder_path != "":
@@ -806,57 +1062,3 @@ class SharepointManager:
             r.raise_for_status()
         else:
             raise SPFolderNotEmpty("Sharepoint folder not empty")
-
-    # ----------------------------------------------------------
-    # Internal HTTP helpers
-    # ----------------------------------------------------------
-
-    def _request(
-        self,
-        method: str,
-        url: str,
-        headers: dict[str, Any] | None = None,
-        timeout: int | None = 30,
-        json: Any | None = None,
-        data: Any | None = None,
-        params: dict[str, Any] | None = None,
-        stream: bool = False,
-        max_attempts: int = 5,
-    ) -> requests.Response:
-        attempt = 1
-        while True:
-            resp = self._session.request(
-                method=method,
-                url=url,
-                headers=headers,
-                timeout=timeout,
-                json=json,
-                data=data,
-                params=params,
-                stream=stream,
-            )
-            # Handle 429/503 with Retry-After
-            if resp.status_code in (429, 503) and attempt < max_attempts:
-                retry_after = resp.headers.get("Retry-After")
-                delay = None
-                try:
-                    delay = int(retry_after) if retry_after is not None else None
-                except Exception:
-                    delay = None
-                if delay is None:
-                    delay = min(2**attempt, 60)
-                time.sleep(delay)
-                attempt += 1
-                continue
-            return resp
-
-    def _paginate(self, url: str) -> Iterator[dict[str, Any]]:
-        """Yield items across Graph pages following @odata.nextLink."""
-        next_url = url
-        while next_url:
-            r = self._request("GET", next_url, headers=self._hdr(), timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            for item in data.get("value", []):
-                yield item
-            next_url = data.get("@odata.nextLink")
