@@ -64,6 +64,14 @@ class SharepointManagerBase:
         raise RuntimeError("Cannot determine tenant id from WWW-Authenticate header")
 
     def _ensure_token(self) -> str:
+        # Return cached token if still valid (with small safety margin)
+        now = int(time.time())
+        cached_token = getattr(self, "_cached_token", None)
+        cached_expiry = int(getattr(self, "_cached_token_expiry", 0))
+        if cached_token and (cached_expiry - now) > 120:
+            return str(cached_token)
+
+        # Acquire a new token
         if isinstance(self.ca, PublicClientApplication):
             result = self.ca.acquire_token_by_username_password(
                 username=self.credentials.username,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
@@ -74,12 +82,31 @@ class SharepointManagerBase:
             result = self.ca.acquire_token_for_client(
                 scopes=["https://graph.microsoft.com/.default"]
             )
+
         if not isinstance(result, dict) or "access_token" not in result.keys():
             error = result
             if isinstance(result, dict):
                 error = result.get("error_description", result)
             raise RuntimeError(f"Authentication failed: {error}")
-        return str(result["access_token"])
+
+        token = str(result["access_token"])
+        # Prefer 'expires_on' (epoch seconds as str) else compute from 'expires_in'
+        try:
+            expires_on = int(result.get("expires_on", 0))
+        except Exception:
+            expires_on = 0
+        if not expires_on:
+            try:
+                expires_in = int(result.get("expires_in", 3600))
+            except Exception:
+                expires_in = 3600
+            expires_on = now + max(expires_in, 60)
+
+        # Cache the token and its expiry
+        setattr(self, "_cached_token", token)
+        setattr(self, "_cached_token_expiry", int(expires_on))
+
+        return token
 
     # ----------------------------------------------------------
     # Internal HTTP helpers
