@@ -293,7 +293,7 @@ class SharepointManagerUrl(SharepointManagerBase):
         Examples
         --------
         >>> manager = SharepointManagerUrl(...)
-        >>> manager.download_file(url = "https://tenant.sharepoint.com/...", local_download_path = "./Download_Dir")
+        >>> manager.download_file_from_url(url = "https://tenant.sharepoint.com/...", local_download_path = "./Download_Dir")
         """
 
         file_obj = self.get_file_metadata_from_url(url)
@@ -324,6 +324,71 @@ class SharepointManagerUrl(SharepointManagerBase):
         logging.info("Download completed.")
 
         return file_obj
+
+    def upload_file_to_url(self, sharing_url: str, local_file_path: str) -> SPFile:
+        """
+        Upload a file to SharePoint file URL.
+
+
+        Parameters
+        ----------
+        url : str
+            The SharePoint file URL.
+        local_file_path : str
+            Local file path
+
+
+        Returns
+        -------
+        SPFile
+            The uploaded file metadata.
+
+        Examples
+        --------
+        >>> manager = SharepointManagerUrl(...)
+        >>> manager.upload_file_to_url(url = "https://tenant.sharepoint.com/...", upload_file_to_url = "./.../file.xlsx")
+        """
+        file_obj = self.get_file_metadata_from_url(sharing_url)
+        drive_id = file_obj.parent_reference["driveId"]
+        item_id = file_obj.id
+
+        file_size = os.path.getsize(local_file_path)
+
+        session_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/createUploadSession"
+
+        body = {"item": {"@microsoft.graph.conflictBehavior": "replace"}}
+
+        r = self._request("POST", session_url, headers=self._hdr(json_content=True), json=body)
+        r.raise_for_status()
+        upload_url = r.json()["uploadUrl"]
+
+        # Chunk size must be a multiple of 327,680 bytes (320 KiB)
+        chunk_size = 327680 * 10  # ~3.2 MB per chunk
+
+        with open(local_file_path, "rb") as f:
+            start = 0
+            while start < file_size:
+                chunk = f.read(chunk_size)
+                curr_chunk_len = len(chunk)
+                end = start + curr_chunk_len - 1
+
+                headers = {
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Content-Length": str(curr_chunk_len),
+                }
+
+                resp = self._session.put(upload_url, headers=headers, data=chunk, timeout=60)
+
+                if resp.status_code not in (200, 201, 202):
+                    resp.raise_for_status()
+
+                start = end + 1
+                logging.info(
+                    f"Downloaded {start / (1024 * 1024):.1f} MiB out of {file_size / (1024 * 1024):.1f}"
+                )
+
+        logging.info("Upload complete.")
+        return SPFile.from_dict(resp.json())
 
 
 class SharepointManager(SharepointManagerBase):
