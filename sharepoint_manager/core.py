@@ -163,234 +163,6 @@ class SharepointManagerBase:
             next_url = data.get("@odata.nextLink")
 
 
-class SharepointManagerUrl(SharepointManagerBase):
-    """
-    Provides an interface for interacting with SharePoint files via direct URLs.
-
-    Supports fetching file metadata and downloading files using Microsoft Graph API.
-    """
-
-    def __init__(
-        self,
-        sharepoint_site_url: str,
-        credentials: ClientCredential | UserDelegatedCredential,
-    ) -> None:
-        """
-        Initializes the SharepointManager with a given SharePoint URL and credentials.
-
-        Parameters
-        ----------
-        sharepoint_site_url : str
-            The URL of the SharePoint site. E.g: 'https://{tenant_url}.sharepoint.com/sites/{site_name}'.
-        credentials : ClientCredential
-            Graph API credentials for authentication.
-        document_folder_name : str, optional
-            The name of the document folder in the SharePoint site. Default is "Shared Documents".
-
-            This is vital to guarantee that the class will be able to find the documents in the site.
-        url_only : bool, optional
-            If True, allows the object to be instantiated without site url and documents_folder_name
-            This is useful when dealing with file URLs without the need to connect to a specific site
-
-        Returns
-        -------
-        None
-
-        Examples
-        --------
-        >>> user_cred = ClientCredential("graph_id", "graph_secret") # Don't hardcode passwords
-        >>> manager = SharepointManager(sharepoint_site_url = "https://my_tenant.sharepoint.com/sites/my_site",
-        >>>     credentials = user_cred,
-        >>>     document_folder_name = "Shared Documents",
-        >>> )
-        """
-
-        self._session: requests.Session = requests.Session()
-        self.credentials: ClientCredential | UserDelegatedCredential = credentials
-
-        self.url: str = sharepoint_site_url
-        self.site_separator: Literal["/teams/", "/sites/"] = (
-            "/teams/" if "/teams/" in self.url else "/sites/"
-        )
-        self.tenant_url: str = sharepoint_site_url.split(self.site_separator, maxsplit=1)[0]
-        self.tenant_id: str = self._get_tenant_id()
-
-        if isinstance(credentials, ClientCredential):
-            self.ca = ConfidentialClientApplication(
-                client_id=credentials.client_id,
-                client_credential=credentials.client_secret,
-                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
-            )
-        else:
-            self.ca = PublicClientApplication(
-                client_id=credentials.client_id,
-                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
-            )
-
-    # ----------------------------------------------------------
-    # Direct URL methods (share URL)
-    # ----------------------------------------------------------
-
-    def get_file_metadata_from_url(self, url: str) -> SPFile:
-        """
-        Retrieve file metadata from a SharePoint file URL.
-
-
-        Parameters
-        ----------
-        url : str
-            The SharePoint file URL.
-
-
-        Returns
-        -------
-        SPFile
-            The file metadata.
-
-        Examples
-        --------
-        >>> manager = SharepointManagerUrl(...)
-        >>> file_metadata = manager.get_file_metadata_from_url(url = "https://tenant.sharepoint.com/...")
-        """
-
-        base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
-        encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
-
-        graph_url = f"https://graph.microsoft.com/v1.0/shares/{encoded_url}/driveItem"
-        headers = self._hdr()
-
-        r = self._request("GET", graph_url, headers=headers, timeout=30)
-        r.raise_for_status()
-        file = SPFile.from_dict(r.json())
-
-        return file
-
-    def download_file_from_url(
-        self,
-        url: str,
-        local_download_path: str,
-        new_filename: str | None = None,
-    ) -> SPFile:
-        """
-        Download a file from SharePoint file URL.
-
-
-        Parameters
-        ----------
-        url : str
-            The SharePoint file URL.
-        local_download_path : str
-            Local folder to download into.
-        new_filename : str, optional
-            If provided, rename the downloaded file.
-
-
-        Returns
-        -------
-        SPFile
-            The downloaded file metadata.
-
-        Examples
-        --------
-        >>> manager = SharepointManagerUrl(...)
-        >>> manager.download_file_from_url(url = "https://tenant.sharepoint.com/...", local_download_path = "./Download_Dir")
-        """
-
-        file_obj = self.get_file_metadata_from_url(url)
-
-        local_download_path = os.path.abspath(local_download_path)
-
-        os.makedirs(local_download_path, exist_ok=True)
-
-        file_size_bytes = int(file_obj.size)
-        file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
-        download_url = file_obj.download_url
-        logging.info(f"Downloading file {file_obj.name} ({file_size_mbytes} MB)")
-
-        chunk_size = 4 * 1024 * 1024
-        downloaded_bytes = 0
-
-        filename = file_obj.name if new_filename is None else new_filename
-        with self._request("GET", download_url, stream=True, timeout=None) as r:
-            r.raise_for_status()
-            with open(f"{local_download_path}/{filename}", "wb") as f:
-                for chunk in r.iter_content(chunk_size=chunk_size):
-                    _ = f.write(chunk)
-                    downloaded_bytes += len(chunk)
-                    logging.info(
-                        f"Downloaded {downloaded_bytes / (1024 * 1024):.1f} MiB out of {file_size_bytes / (1024 * 1024):.1f}"
-                    )
-
-        logging.info("Download completed.")
-
-        return file_obj
-
-    def upload_file_to_url(self, sharing_url: str, local_file_path: str) -> SPFile:
-        """
-        Upload a file to SharePoint file URL.
-
-
-        Parameters
-        ----------
-        url : str
-            The SharePoint file URL.
-        local_file_path : str
-            Local file path
-
-
-        Returns
-        -------
-        SPFile
-            The uploaded file metadata.
-
-        Examples
-        --------
-        >>> manager = SharepointManagerUrl(...)
-        >>> manager.upload_file_to_url(url = "https://tenant.sharepoint.com/...", upload_file_to_url = "./.../file.xlsx")
-        """
-        file_obj = self.get_file_metadata_from_url(sharing_url)
-        drive_id = file_obj.parent_reference["driveId"]
-        item_id = file_obj.id
-
-        file_size = os.path.getsize(local_file_path)
-
-        session_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/createUploadSession"
-
-        body = {"item": {"@microsoft.graph.conflictBehavior": "replace"}}
-
-        r = self._request("POST", session_url, headers=self._hdr(json_content=True), json=body)
-        r.raise_for_status()
-        upload_url = r.json()["uploadUrl"]
-
-        # Chunk size must be a multiple of 327,680 bytes (320 KiB)
-        chunk_size = 327680 * 10  # ~3.2 MB per chunk
-
-        with open(local_file_path, "rb") as f:
-            start = 0
-            while start < file_size:
-                chunk = f.read(chunk_size)
-                curr_chunk_len = len(chunk)
-                end = start + curr_chunk_len - 1
-
-                headers = {
-                    "Content-Range": f"bytes {start}-{end}/{file_size}",
-                    "Content-Length": str(curr_chunk_len),
-                }
-
-                resp = self._session.put(upload_url, headers=headers, data=chunk, timeout=60)
-
-                if resp.status_code not in (200, 201, 202):
-                    resp.raise_for_status()
-
-                start = end + 1
-                logging.info(
-                    f"Downloaded {start / (1024 * 1024):.1f} MiB out of {file_size / (1024 * 1024):.1f}"
-                )
-
-        logging.info("Upload complete.")
-        return SPFile.from_dict(resp.json())
-
-
 class SharepointManager(SharepointManagerBase):
     """
     Provides an interface for interacting with a SharePoint site.
@@ -485,6 +257,172 @@ class SharepointManager(SharepointManagerBase):
         self._drive_id: str = self._get_drive_id()
         self.folder: SPFolder = self._get_folder("")
         self.users: dict[str, Any] = {}
+
+    # ----------------------------------------------------------
+    # Direct URL methods (share URL)
+    # ----------------------------------------------------------
+
+    def get_file_metadata_from_url(self, url: str) -> SPFile:
+        """
+        Retrieve file metadata from a SharePoint file URL.
+
+
+        Parameters
+        ----------
+        url : str
+            The SharePoint file URL.
+
+
+        Returns
+        -------
+        SPFile
+            The file metadata.
+
+        Examples
+        --------
+        >>> manager = SharepointManager(...)
+        >>> file_metadata = manager.get_file_metadata_from_url(url = "https://tenant.sharepoint.com/...")
+        """
+
+        base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
+        encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
+
+        graph_url = f"https://graph.microsoft.com/v1.0/shares/{encoded_url}/driveItem"
+        headers = self._hdr()
+
+        r = self._request("GET", graph_url, headers=headers, timeout=30)
+        r.raise_for_status()
+        file = SPFile.from_dict(r.json())
+
+        return file
+
+    def download_file_from_url(
+        self,
+        url: str,
+        local_download_path: str,
+        new_filename: str | None = None,
+    ) -> SPFile:
+        """
+        Download a file from SharePoint file URL.
+
+
+        Parameters
+        ----------
+        url : str
+            The SharePoint file URL.
+        local_download_path : str
+            Local folder to download into.
+        new_filename : str, optional
+            If provided, rename the downloaded file.
+
+
+        Returns
+        -------
+        SPFile
+            The downloaded file metadata.
+
+        Examples
+        --------
+        >>> manager = SharepointManager(...)
+        >>> manager.download_file_from_url(url = "https://tenant.sharepoint.com/...", local_download_path = "./Download_Dir")
+        """
+
+        file_obj = self.get_file_metadata_from_url(url)
+
+        local_download_path = os.path.abspath(local_download_path)
+
+        os.makedirs(local_download_path, exist_ok=True)
+
+        file_size_bytes = int(file_obj.size)
+        file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
+        download_url = file_obj.download_url
+        logging.info("Downloading file %s (%s MB)", file_obj.name, file_size_mbytes)
+
+        chunk_size = 4 * 1024 * 1024
+        downloaded_bytes = 0
+
+        filename = file_obj.name if new_filename is None else new_filename
+        with self._request("GET", download_url, stream=True, timeout=None) as r:
+            r.raise_for_status()
+            with open(f"{local_download_path}/{filename}", "wb") as f:
+                for chunk in r.iter_content(chunk_size=chunk_size):
+                    _ = f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    logging.info(
+                        "Downloaded %.1f MiB out of %.1f",
+                        downloaded_bytes / (1024 * 1024),
+                        file_size_bytes / (1024 * 1024),
+                    )
+
+        logging.info("Download completed.")
+
+        return file_obj
+
+    def upload_file_to_url(self, sharing_url: str, local_file_path: str) -> SPFile:
+        """
+        Upload a file to SharePoint file URL.
+
+
+        Parameters
+        ----------
+        url : str
+            The SharePoint file URL.
+        local_file_path : str
+            Local file path
+
+
+        Returns
+        -------
+        SPFile
+            The uploaded file metadata.
+
+        Examples
+        --------
+        >>> manager = SharepointManagerUrl(...)
+        >>> manager.upload_file_to_url(url = "https://tenant.sharepoint.com/...", upload_file_to_url = "./.../file.xlsx")
+        """
+        file_obj = self.get_file_metadata_from_url(sharing_url)
+        drive_id = file_obj.parent_reference["driveId"]
+        item_id = file_obj.id
+
+        file_size = os.path.getsize(local_file_path)
+
+        session_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/createUploadSession"
+
+        body = {"item": {"@microsoft.graph.conflictBehavior": "replace"}}
+
+        r = self._request("POST", session_url, headers=self._hdr(json_content=True), json=body)
+        r.raise_for_status()
+        upload_url = r.json()["uploadUrl"]
+
+        # Chunk size must be a multiple of 327,680 bytes (320 KiB)
+        chunk_size = 327680 * 10  # ~3.2 MB per chunk
+
+        with open(local_file_path, "rb") as f:
+            start = 0
+            while start < file_size:
+                chunk = f.read(chunk_size)
+                curr_chunk_len = len(chunk)
+                end = start + curr_chunk_len - 1
+
+                headers = {
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Content-Length": str(curr_chunk_len),
+                }
+
+                resp = self._session.put(upload_url, headers=headers, data=chunk, timeout=60)
+
+                if resp.status_code not in (200, 201, 202):
+                    resp.raise_for_status()
+
+                start = end + 1
+                logging.info(
+                    "Uploaded %.1f MiB out of %.1f",
+                    start / (1024 * 1024),
+                    file_size / (1024 * 1024),
+                )
+        logging.info("Upload complete.")
+        return SPFile.from_dict(resp.json())
 
     # ----------------------------------------------------------
     # Support Methods
