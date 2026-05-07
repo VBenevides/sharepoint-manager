@@ -8,7 +8,7 @@ from setuptools import setup
 
 _ = setup(
     name="sharepoint_manager",
-    version="0.0.7",
+    version="0.0.8",
     packages=["sharepoint_manager"],
     url="https://github.com/VBenevides/sharepoint-manager",
     license="MIT",

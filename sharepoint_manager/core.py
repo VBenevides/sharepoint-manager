@@ -9,10 +9,15 @@ Module used to interact with sharepoint sites using an approach similar to file 
 from typing import Any, Literal
 import base64
 from collections.abc import Iterator
+from contextlib import contextmanager
+from email.utils import parsedate_to_datetime
 import os
 import re
 import time
+import threading
 import logging
+from urllib.parse import urlparse, unquote
+
 import requests
 
 from msal import ConfidentialClientApplication, PublicClientApplication
@@ -20,7 +25,30 @@ from msal import ConfidentialClientApplication, PublicClientApplication
 from .decorators import retry_if_not_exception, retry
 from .dataclasses import ClientCredential, UserDelegatedCredential, SPFolder, SPFile
 from .exceptions import SPFolderNotEmpty, SPFileNotFound, SPFolderNotFound
-from .utils import get_filename, get_names_to_folder
+from .utils import (
+    get_filename,
+    get_names_to_folder,
+    safe_join,
+    quote_path,
+    quote_segment,
+    parse_www_authenticate,
+)
+
+logger = logging.getLogger(__name__)
+
+# Conservative throttling of progress log lines to avoid flooding stdout for
+# multi-GB transfers.
+_PROGRESS_LOG_INTERVAL_SEC = 2.0
+# Statuses that should be retried in addition to 429.
+_RETRY_STATUSES = (429, 500, 502, 503, 504)
+# Microsoft Graph upload chunks must be a multiple of 320 KiB.
+_GRAPH_CHUNK_UNIT = 327680
+# ~6.25 MiB upload chunk – within Graph's 5–10 MiB recommendation.
+_UPLOAD_CHUNK_SIZE = 20 * _GRAPH_CHUNK_UNIT
+# Streaming download chunk size.
+_DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+# GUID pattern used to extract a tenant id from authorization URIs.
+_GUID_RE = re.compile(r"/([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})")
 
 
 class SharepointManagerBase:
@@ -28,10 +56,24 @@ class SharepointManagerBase:
     Base class for Sharepoint Manager Classes
     """
 
-    credentials: ClientCredential | UserDelegatedCredential  # pyright: ignore[reportUninitializedInstanceVariable]
-    ca: ConfidentialClientApplication | PublicClientApplication  # pyright: ignore[reportUninitializedInstanceVariable]
-    _session: requests.Session  # pyright: ignore[reportUninitializedInstanceVariable]
-    tenant_url: str  # pyright: ignore[reportUninitializedInstanceVariable]
+    credentials: ClientCredential | UserDelegatedCredential
+    ca: ConfidentialClientApplication | PublicClientApplication
+    _session: requests.Session
+    tenant_url: str
+
+    # Per-instance lock guarding the token cache. Initialised lazily so the
+    # base class works for subclasses that don't call ``__init__`` themselves.
+    _token_lock: threading.Lock
+
+    def _get_token_lock(self) -> threading.Lock:
+        lock = getattr(self, "_token_lock", None)
+        if lock is None:
+            # Race here is benign – worst case two locks are created and the
+            # one stored last wins. The very first cached token write will
+            # still be observed by readers thanks to the GIL semantics.
+            lock = threading.Lock()
+            setattr(self, "_token_lock", lock)
+        return lock
 
     # ----------------------------------------------------------
     # Support Methods
@@ -48,65 +90,73 @@ class SharepointManagerBase:
         """Retrieve the tenant ID from the SharePoint tenant URL."""
 
         r = self._request("HEAD", self.tenant_url, headers={"Authorization": "Bearer"}, timeout=20)
-        hdr = r.headers.get("WWW-Authenticate", "")
-        m = re.search(r'realm="([^"]+)"', hdr)
-        if m:
-            return m.group(1)
-        for item in hdr.split(","):
-            if '="' in item:
-                k, v = item.split("=", 1)
-                v = v.strip()
-                if v.startswith('"') and v.endswith('"'):
-                    v = v[1:-1]
-                if k.strip().lower() == "bearer realm":
-                    return str(v)
+        params = parse_www_authenticate(r.headers.get("WWW-Authenticate", ""))
+        realm = params.get("bearer realm") or params.get("realm")
+        if realm:
+            return realm
+        # Some tenants return ``authorization_uri=https://login.microsoftonline.com/{tid}``
+        auth_uri = params.get("authorization_uri") or params.get("authorization")
+        if auth_uri:
+            m = _GUID_RE.search(auth_uri)
+            if m:
+                return m.group(1)
 
         raise RuntimeError("Cannot determine tenant id from WWW-Authenticate header")
 
     def _ensure_token(self) -> str:
-        # Return cached token if still valid (with small safety margin)
+        # Fast path – lock-free read of the cached token.
         now = int(time.time())
         cached_token = getattr(self, "_cached_token", None)
         cached_expiry = int(getattr(self, "_cached_token_expiry", 0))
         if cached_token and (cached_expiry - now) > 120:
             return str(cached_token)
 
-        # Acquire a new token
-        if isinstance(self.ca, PublicClientApplication):
-            result = self.ca.acquire_token_by_username_password(
-                username=self.credentials.username,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-                password=self.credentials.password,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-                scopes=["https://graph.microsoft.com/.default"],
-            )
-        else:
-            result = self.ca.acquire_token_for_client(
-                scopes=["https://graph.microsoft.com/.default"]
-            )
+        # Slow path – only one thread per instance refreshes the token.
+        with self._get_token_lock():
+            # Re-check inside the lock so concurrent callers wait once and
+            # then reuse the freshly cached token.
+            now = int(time.time())
+            cached_token = getattr(self, "_cached_token", None)
+            cached_expiry = int(getattr(self, "_cached_token_expiry", 0))
+            if cached_token and (cached_expiry - now) > 120:
+                return str(cached_token)
 
-        if not isinstance(result, dict) or "access_token" not in result.keys():
-            error = result
-            if isinstance(result, dict):
-                error = result.get("error_description", result)
-            raise RuntimeError(f"Authentication failed: {error}")
+            # Acquire a new token
+            if isinstance(self.ca, PublicClientApplication):
+                result = self.ca.acquire_token_by_username_password(
+                    username=self.credentials.username,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+                    password=self.credentials.password,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+                    scopes=["https://graph.microsoft.com/.default"],
+                )
+            else:
+                result = self.ca.acquire_token_for_client(
+                    scopes=["https://graph.microsoft.com/.default"]
+                )
 
-        token = str(result["access_token"])
-        # Prefer 'expires_on' (epoch seconds as str) else compute from 'expires_in'
-        try:
-            expires_on = int(result.get("expires_on", 0))
-        except Exception:
-            expires_on = 0
-        if not expires_on:
+            if not isinstance(result, dict) or "access_token" not in result.keys():
+                error = result
+                if isinstance(result, dict):
+                    error = result.get("error_description", result)
+                raise RuntimeError(f"Authentication failed: {error}")
+
+            token = str(result["access_token"])
+            # Prefer 'expires_on' (epoch seconds as str) else compute from 'expires_in'
             try:
-                expires_in = int(result.get("expires_in", 3600))
+                expires_on = int(result.get("expires_on", 0))
             except Exception:
-                expires_in = 3600
-            expires_on = now + max(expires_in, 60)
+                expires_on = 0
+            if not expires_on:
+                try:
+                    expires_in = int(result.get("expires_in", 3600))
+                except Exception:
+                    expires_in = 3600
+                expires_on = now + max(expires_in, 60)
 
-        # Cache the token and its expiry
-        setattr(self, "_cached_token", token)
-        setattr(self, "_cached_token_expiry", int(expires_on))
+            # Cache the token and its expiry
+            setattr(self, "_cached_token", token)
+            setattr(self, "_cached_token_expiry", int(expires_on))
 
-        return token
+            return token
 
     # ----------------------------------------------------------
     # Internal HTTP helpers
@@ -117,7 +167,7 @@ class SharepointManagerBase:
         method: str,
         url: str,
         headers: dict[str, Any] | None = None,
-        timeout: int | None = 30,
+        timeout: int | tuple[int, int] | None = 30,
         json: Any | None = None,
         data: Any | None = None,
         params: dict[str, Any] | None = None,
@@ -136,16 +186,28 @@ class SharepointManagerBase:
                 params=params,
                 stream=stream,
             )
-            # Handle 429/503 with Retry-After
-            if resp.status_code in (429, 503) and attempt < max_attempts:
+            # Handle throttling / transient 5xx with Retry-After.
+            if resp.status_code in _RETRY_STATUSES and attempt < max_attempts:
                 retry_after = resp.headers.get("Retry-After")
-                delay = None
-                try:
-                    delay = int(retry_after) if retry_after is not None else None
-                except Exception:
-                    delay = None
+                delay: float | None = None
+                if retry_after is not None:
+                    try:
+                        delay = float(int(retry_after))
+                    except (TypeError, ValueError):
+                        # Fall back to HTTP-date format.
+                        try:
+                            target = parsedate_to_datetime(retry_after)
+                            delay = max(0.0, target.timestamp() - time.time())
+                        except (TypeError, ValueError):
+                            delay = None
                 if delay is None:
-                    delay = min(2**attempt, 60)
+                    delay = float(min(2**attempt, 60))
+                # Release any streamed body before sleeping to avoid leaking
+                # connections back to the pool in CLOSE_WAIT.
+                try:
+                    resp.close()
+                except Exception:
+                    pass
                 time.sleep(delay)
                 attempt += 1
                 continue
@@ -153,7 +215,7 @@ class SharepointManagerBase:
 
     def _paginate(self, url: str) -> Iterator[dict[str, Any]]:
         """Yield items across Graph pages following @odata.nextLink."""
-        next_url = url
+        next_url: str | None = url
         while next_url:
             r = self._request("GET", next_url, headers=self._hdr(), timeout=30)
             r.raise_for_status()
@@ -194,7 +256,7 @@ class SharepointManager(SharepointManagerBase):
         self,
         sharepoint_site_url: str,
         credentials: ClientCredential | UserDelegatedCredential,
-        document_folder_name: str = "Shared Documents",
+        document_folder_name: str | None = None,
     ) -> None:
         """
         Initializes the SharepointManager with a given SharePoint URL and credentials.
@@ -206,7 +268,10 @@ class SharepointManager(SharepointManagerBase):
         credentials : ClientCredential
             Graph API credentials for authentication.
         document_folder_name : str, optional
-            The name of the document folder in the SharePoint site. Default is "Shared Documents".
+            The name of the document folder (drive) in the SharePoint site. If ``None``
+            (default), the site's default document library is auto-detected via the
+            Microsoft Graph ``/drive`` endpoint and its name is resolved from the
+            returned ``webUrl``.
 
             This is vital to guarantee that the class will be able to find the documents in the site.
 
@@ -219,7 +284,6 @@ class SharepointManager(SharepointManagerBase):
         >>> user_cred = ClientCredential("graph_id", "graph_secret") # Don't hardcode passwords
         >>> manager = SharepointManager(sharepoint_site_url = "https://my_tenant.sharepoint.com/sites/my_site",
         >>>     credentials = user_cred,
-        >>>     document_folder_name = "Shared Documents",
         >>> )
         """
 
@@ -227,9 +291,15 @@ class SharepointManager(SharepointManagerBase):
         self.credentials: ClientCredential | UserDelegatedCredential = credentials
 
         self.url: str = sharepoint_site_url
-        self.site_separator: Literal["/teams/", "/sites/"] = (
-            "/teams/" if "/teams/" in self.url else "/sites/"
-        )
+        if "/teams/" in self.url:
+            self.site_separator: Literal["/teams/", "/sites/"] = "/teams/"
+        elif "/sites/" in self.url:
+            self.site_separator = "/sites/"
+        else:
+            raise ValueError(
+                "sharepoint_site_url must contain '/sites/' or '/teams/'. "
+                f"Got: {sharepoint_site_url!r}"
+            )
         self.tenant_url: str = sharepoint_site_url.split(self.site_separator, maxsplit=1)[0]
         self.tenant_id: str = self._get_tenant_id()
 
@@ -248,15 +318,53 @@ class SharepointManager(SharepointManagerBase):
                 authority=f"https://login.microsoftonline.com/{self.tenant_id}",
             )
 
-        self.document_folder_name: str = document_folder_name
-        self.relative_path_root: str = (
-            f"{self.site_separator}{self.site_name}/{document_folder_name}"
-        )
+        self.document_folder_name: str | None = document_folder_name
 
         self._site_id: str = self._get_site_id()
         self._drive_id: str = self._get_drive_id()
+        # ``document_folder_name`` may have been resolved by ``_get_drive_id`` when
+        # it was initially ``None`` (auto-detected default document library).
+        self.relative_path_root: str = (
+            f"{self.site_separator}{self.site_name}/{self.document_folder_name}"
+        )
         self.folder: SPFolder = self._get_folder("")
-        self.users: dict[str, Any] = {}
+
+    # ----------------------------------------------------------
+    # Lifecycle / debugging helpers
+    # ----------------------------------------------------------
+
+    def __repr__(self) -> str:
+        return (
+            f"SharepointManager(site={self.url!r}, document_folder={self.document_folder_name!r})"
+        )
+
+    def close(self) -> None:
+        """Release the underlying HTTP session."""
+        try:
+            self._session.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "SharepointManager":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    @contextmanager
+    def cwd(self, sp_relative_folder_path: str, create_folder: bool = False):
+        """
+        Temporarily switch ``self.folder`` to ``sp_relative_folder_path``.
+
+        Restores the previous folder on exit, even on exceptions, so calls
+        nested inside the ``with`` block don't leak state to the caller.
+        """
+        previous = self.folder
+        try:
+            self.set_folder(sp_relative_folder_path, create_folder=create_folder)
+            yield self.folder
+        finally:
+            self.folder = previous
 
     # ----------------------------------------------------------
     # Direct URL methods (share URL)
@@ -324,7 +432,7 @@ class SharepointManager(SharepointManagerBase):
         Examples
         --------
         >>> manager = SharepointManager(...)
-        >>> manager.download_file_from_url(url = "https://tenant.sharepoint.com/...", local_download_path = "./Download_Dir")
+        >>> manager.download_file(url = "https://tenant.sharepoint.com/...", local_download_path = "./Download_Dir")
         """
 
         file_obj = self.get_file_metadata_from_url(url)
@@ -336,105 +444,240 @@ class SharepointManager(SharepointManagerBase):
         file_size_bytes = int(file_obj.size)
         file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
         download_url = file_obj.download_url
-        logging.info("Downloading file %s (%s MB)", file_obj.name, file_size_mbytes)
+        logger.info("Downloading file %s (%s MB)", file_obj.name, file_size_mbytes)
 
-        chunk_size = 4 * 1024 * 1024
+        chunk_size = _DOWNLOAD_CHUNK_SIZE
         downloaded_bytes = 0
 
         filename = file_obj.name if new_filename is None else new_filename
-        with self._request("GET", download_url, stream=True, timeout=None) as r:
+        target_path = safe_join(local_download_path, filename)
+        last_log = 0.0
+        with self._request("GET", download_url, stream=True, timeout=(10, 300)) as r:
             r.raise_for_status()
-            with open(f"{local_download_path}/{filename}", "wb") as f:
+            with open(target_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=chunk_size):
+                    if not chunk:
+                        continue
                     _ = f.write(chunk)
                     downloaded_bytes += len(chunk)
-                    logging.info(
-                        "Downloaded %.1f MiB out of %.1f",
-                        downloaded_bytes / (1024 * 1024),
-                        file_size_bytes / (1024 * 1024),
-                    )
+                    now = time.monotonic()
+                    if (
+                        now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
+                        or downloaded_bytes >= file_size_bytes
+                    ):
+                        logger.info(
+                            "Downloaded %.1f MiB out of %.1f",
+                            downloaded_bytes / (1024 * 1024),
+                            file_size_bytes / (1024 * 1024),
+                        )
+                        last_log = now
 
-        logging.info("Download completed.")
+        logger.info("Download completed: %s", file_obj.name)
 
         return file_obj
 
     def upload_file_to_url(self, sharing_url: str, local_file_path: str) -> SPFile:
         """
-        Upload a file to SharePoint file URL.
-
-
-        Parameters
-        ----------
-        url : str
-            The SharePoint file URL.
-        local_file_path : str
-            Local file path
-
-
-        Returns
-        -------
-        SPFile
-            The uploaded file metadata.
-
-        Examples
-        --------
-        >>> manager = SharepointManagerUrl(...)
-        >>> manager.upload_file_to_url(url = "https://tenant.sharepoint.com/...", upload_file_to_url = "./.../file.xlsx")
+        Uploads a file to SharePoint using an Upload Session.
+        Works for any file size by breaking the file into 320KiB-aligned chunks.
         """
+        # 1. Resolve the sharing URL to get Drive and Parent IDs
         file_obj = self.get_file_metadata_from_url(sharing_url)
         drive_id = file_obj.parent_reference["driveId"]
         item_id = file_obj.id
 
         file_size = os.path.getsize(local_file_path)
 
-        session_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/createUploadSession"
+        # 2. Create the Upload Session
+        session_url = (
+            f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+            f"/items/{item_id}/createUploadSession"
+        )
 
+        # Optional: Conflict behavior (fail, replace, or rename)
         body = {"item": {"@microsoft.graph.conflictBehavior": "replace"}}
 
         r = self._request("POST", session_url, headers=self._hdr(json_content=True), json=body)
         r.raise_for_status()
         upload_url = r.json()["uploadUrl"]
 
+        # 3. Upload the file in chunks
         # Chunk size must be a multiple of 327,680 bytes (320 KiB)
-        chunk_size = 327680 * 10  # ~3.2 MB per chunk
+        chunk_size = _UPLOAD_CHUNK_SIZE
+        last_log = 0.0
+        resp: requests.Response | None = None
 
-        with open(local_file_path, "rb") as f:
-            start = 0
-            while start < file_size:
-                chunk = f.read(chunk_size)
-                curr_chunk_len = len(chunk)
-                end = start + curr_chunk_len - 1
+        try:
+            with open(local_file_path, "rb") as f:
+                start = 0
+                while start < file_size:
+                    chunk = f.read(chunk_size)
+                    curr_chunk_len = len(chunk)
+                    end = start + curr_chunk_len - 1
 
-                headers = {
-                    "Content-Range": f"bytes {start}-{end}/{file_size}",
-                    "Content-Length": str(curr_chunk_len),
-                }
+                    headers = {
+                        "Content-Range": f"bytes {start}-{end}/{file_size}",
+                        "Content-Length": str(curr_chunk_len),
+                    }
 
-                resp = self._session.put(upload_url, headers=headers, data=chunk, timeout=60)
+                    resp = self._request("PUT", upload_url, headers=headers, data=chunk, timeout=60)
 
-                if resp.status_code not in (200, 201, 202):
-                    resp.raise_for_status()
+                    if resp.status_code not in (200, 201, 202):
+                        resp.raise_for_status()
 
-                start = end + 1
-                logging.info(
-                    "Uploaded %.1f MiB out of %.1f",
-                    start / (1024 * 1024),
-                    file_size / (1024 * 1024),
-                )
-        logging.info("Upload complete.")
+                    start = end + 1
+                    now = time.monotonic()
+                    if now - last_log >= _PROGRESS_LOG_INTERVAL_SEC or start >= file_size:
+                        logger.info("Uploaded %s/%s bytes...", start, file_size)
+                        last_log = now
+        except Exception:
+            # Best-effort cancel of the upload session if anything goes wrong.
+            try:
+                self._request("DELETE", upload_url, timeout=30)
+            except Exception:
+                pass
+            raise
+
+        logger.info("Upload complete.")
+        if resp is None:
+            raise RuntimeError("Upload session produced no response (empty file?)")
         return SPFile.from_dict(resp.json())
+
+    def _consume_delta(self, start_url: str) -> tuple[str | None, list["SPFile"], list["SPFolder"]]:
+        """Iterate a Microsoft Graph delta endpoint and return the latest delta
+        link together with the files and folders it yields."""
+
+        headers = self._hdr()
+        next_url: str | None = start_url
+        items: list[dict[str, Any]] = []
+        latest_delta_link: str | None = None
+        page_count = 0
+
+        while next_url:
+            response = self._request("GET", next_url, headers=headers, timeout=30)
+            response.raise_for_status()
+
+            payload = response.json()
+            items.extend(payload.get("value", []))
+
+            latest_delta_link = payload.get("@odata.deltaLink", latest_delta_link)
+            next_url = payload.get("@odata.nextLink")
+            page_count += 1
+
+        if latest_delta_link is None and page_count > 0:
+            logger.warning(
+                "Delta endpoint returned no @odata.deltaLink across %d page(s); "
+                "subsequent incremental queries may be impossible.",
+                page_count,
+            )
+
+        files = [SPFile.from_dict(x) for x in items if "file" in x]
+        folders = [SPFolder.from_dict(x) for x in items if "folder" in x]
+
+        return latest_delta_link, files, folders
+
+    def get_folder_delta(
+        self,
+        sp_relative_folder_path: str = "",
+        delta_link: str | None = None,
+    ) -> tuple[str | None, list[SPFile], list[SPFolder]]:
+        """
+        Return the latest delta link plus the files and folders found beneath a
+        folder identified by its path relative to the document library root.
+
+        Parameters
+        ----------
+        sp_relative_folder_path : str, optional
+            Folder path relative to the document library (e.g. ``"Folder/Subfolder"``).
+            Defaults to ``""`` which resolves to the document library root.
+        delta_link : str | None, optional
+            Existing Microsoft Graph delta link. If provided, only changes are fetched
+            and ``sp_relative_folder_path`` is ignored.
+
+        Returns
+        -------
+        tuple[str | None, list[SPFile], list[SPFolder]]
+            The latest delta link, the list of files and the list of folders.
+
+        Examples
+        --------
+        >>> manager = SharepointManager(...)
+        >>> delta_link, files, folders = manager.get_folder_delta("Folder/Subfolder")
+        """
+
+        if delta_link is not None:
+            return self._consume_delta(delta_link)
+
+        folder = self._get_folder(sp_relative_folder_path)
+        start_url = (
+            f"https://graph.microsoft.com/v1.0/drives/{self._drive_id}/items/{folder.id}/delta"
+        )
+        return self._consume_delta(start_url)
+
+    def get_folder_delta_from_url(
+        self,
+        url: str,
+        delta_link: str | None = None,
+    ) -> tuple[str | None, list[SPFile], list[SPFolder]]:
+        """
+        Return the latest delta link plus the files and folders found beneath a
+        folder identified by its absolute SharePoint URL.
+
+        Parameters
+        ----------
+        url : str
+            Absolute SharePoint folder URL.
+        delta_link : str | None, optional
+            Existing Microsoft Graph delta link. If provided, only changes are fetched
+            and ``url`` is ignored.
+
+        Returns
+        -------
+        tuple[str | None, list[SPFile], list[SPFolder]]
+            The latest delta link, the list of files and the list of folders.
+
+        Examples
+        --------
+        >>> manager = SharepointManager(...)
+        >>> delta_link, files, folders = manager.get_folder_delta_from_url(
+        ...     "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Folder"
+        ... )
+        """
+
+        if delta_link is not None:
+            return self._consume_delta(delta_link)
+
+        base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
+        encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
+
+        graph_url = f"https://graph.microsoft.com/v1.0/shares/{encoded_url}/driveItem"
+        response = self._request("GET", graph_url, headers=self._hdr(), timeout=30)
+        response.raise_for_status()
+
+        folder_item = response.json()
+        parent_reference = folder_item.get("parentReference", {})
+        drive_id = parent_reference.get("driveId")
+        item_id = folder_item.get("id")
+
+        if not drive_id or not item_id:
+            raise RuntimeError("Folder metadata is missing driveId or id")
+
+        start_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/delta"
+        return self._consume_delta(start_url)
 
     # ----------------------------------------------------------
     # Support Methods
     # ----------------------------------------------------------
 
     def _get_site_id(self) -> str:
-        parts = [x for x in self.url.split("/") if len(x) > 0]
-        tenant = [x for x in parts if "share" in x.lower() or ".com" in x.lower()][0]
+        host = urlparse(self.url).hostname
+        if not host:
+            raise ValueError(f"Could not parse host from URL: {self.url!r}")
         site = self.url.split(self.site_separator)[-1]
         if self.site_separator not in site:
             site = f"{self.site_separator}{site}"
-        url = f"https://graph.microsoft.com/v1.0/sites/{tenant}:{site}"
+        # Quote the site path while preserving slashes.
+        url = f"https://graph.microsoft.com/v1.0/sites/{host}:{quote_path(site)}"
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
         r.raise_for_status()
         self._site_id = r.json()["id"]
@@ -449,11 +692,14 @@ class SharepointManager(SharepointManagerBase):
             timeout=30,
         )
         r.raise_for_status()
-        for d in r.json().get("value", []):
-            if d.get("name") == self.document_folder_name:
-                self._drive_id = d["id"]
-                return self._drive_id
+        if self.document_folder_name is not None:
+            for d in r.json().get("value", []):
+                if d.get("name") == self.document_folder_name:
+                    self._drive_id = d["id"]
+                    return self._drive_id
 
+        # Auto-detect the default document library when no name was provided
+        # or when no drive matched the supplied name.
         r = self._request(
             "GET",
             f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive",
@@ -462,17 +708,17 @@ class SharepointManager(SharepointManagerBase):
         )
         if r.status_code == 200:
             self._drive_id = r.json()["id"]
-            self.document_folder_name = r.json()["webUrl"].split("/")[-1]
+            self.document_folder_name = unquote(r.json()["webUrl"].split("/")[-1])
             return self._drive_id
         raise RuntimeError("Drive not found for site")
 
     def _get_folder(self, folder_path: str) -> SPFolder:
-        """folder_dict"""
+        """Resolve a folder under the current drive by its relative path."""
 
         site_id = self._site_id
         drive_id = self._drive_id
         if folder_path != "":
-            site = f":/{folder_path}"
+            site = f":/{quote_path(folder_path.strip('/'))}"
         else:
             site = ""
         r = self._request(
@@ -488,24 +734,48 @@ class SharepointManager(SharepointManagerBase):
         return SPFolder.from_dict(r.json())
 
     def _get_file(self, filename: str) -> SPFile:
-        site_id = self._site_id
+        """Fetch a file directly under the current folder by name (O(1) lookup)."""
         drive_id = self._drive_id
-
         folder_id = str(self.folder.id)
-        url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/items/{folder_id}/children"
-        for obj in self._paginate(url):
-            if isinstance(obj, dict) and obj.get("name", "") == filename:
-                return SPFile.from_dict(obj)
-        raise SPFileNotFound("SP file not found")
+        encoded_name = quote_segment(filename)
+        url = (
+            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_id}:/{encoded_name}"
+        )
+        r = self._request("GET", url, headers=self._hdr(), timeout=30)
+        if r.status_code == 404:
+            raise SPFileNotFound(f"SP file not found: {filename}")
+        r.raise_for_status()
+        data = r.json()
+        if "file" not in data:
+            # Path resolved to a folder, not a file.
+            raise SPFileNotFound(f"SP file not found (path is a folder): {filename}")
+        return SPFile.from_dict(data)
 
     @retry(attempts=4, exceptions=Exception)
+    def _create_single_folder(self, parent_id: str, folder_name: str) -> SPFolder:
+        """Create a single child folder under ``parent_id``.
+
+        Retried independently so deep recursion in :meth:`_create_folder`
+        does not produce O(attempts**depth) requests.
+        """
+        drive_id = self._drive_id
+        payload = {"name": folder_name, "folder": {}}
+        r = self._request(
+            "POST",
+            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{parent_id}/children",
+            headers=self._hdr(json_content=True),
+            timeout=30,
+            json=payload,
+        )
+        r.raise_for_status()
+        return SPFolder.from_dict(r.json())
+
     def _create_folder(self, folder_path: str) -> SPFolder | None:
         try:
             return self._get_folder(folder_path)
-        except Exception:
+        except SPFolderNotFound:
             pass
 
-        drive_id = self._drive_id
         parts = folder_path.split("/")
         parent_folder = "/".join(parts[:-1])
         folder_name = parts[-1]
@@ -517,17 +787,7 @@ class SharepointManager(SharepointManagerBase):
         if parent_data is None:
             raise SPFolderNotFound("SP Parent folder not found")
 
-        parent_id = parent_data.id
-
-        payload = {"name": folder_name, "folder": {}}
-        r = requests.post(
-            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{parent_id}/children",
-            headers=self._hdr(),
-            timeout=30,
-            json=payload,
-        )
-        r.raise_for_status()
-        return SPFolder.from_dict(r.json())
+        return self._create_single_folder(parent_data.id, folder_name)
 
     # ----------------------------------------------------------
     # Basic file system functions
@@ -550,23 +810,24 @@ class SharepointManager(SharepointManagerBase):
             Dictionary with "author" and "editor" entries.
         """
 
-        created_by = file.created_by
-        author = {}
-        user = list(created_by.keys())[0]
-        created_by = created_by[user]
-        author["id"] = created_by.get("id", "")
-        author["display_name"] = created_by.get("displayName", "")
-        author["email"] = created_by.get("email", "")
+        def _extract(by: dict[str, Any] | None) -> dict[str, str]:
+            # Graph's ``createdBy`` / ``lastModifiedBy`` look like
+            # ``{"user": {...}, "application": {...}}``. Prefer the user
+            # identity; fall back to whatever identity is present.
+            by = by or {}
+            identity = by.get("user")
+            if not isinstance(identity, dict):
+                identity = next((v for v in by.values() if isinstance(v, dict)), {})
+            return {
+                "id": str(identity.get("id", "")),
+                "display_name": str(identity.get("displayName", "")),
+                "email": str(identity.get("email", "")),
+            }
 
-        modified_by = file.last_modified_by
-        editor = {}
-        user = list(modified_by.keys())[0]
-        modified_by = modified_by[user]
-        editor["id"] = modified_by.get("id", "")
-        editor["display_name"] = modified_by.get("displayName", "")
-        editor["email"] = modified_by.get("email", "")
-
-        return {"author": author, "editor": editor}
+        return {
+            "author": _extract(file.created_by),
+            "editor": _extract(file.last_modified_by),
+        }
 
     @retry_if_not_exception(attempts=3, exceptions=(SPFolderNotFound))
     def set_folder(self, sp_relative_folder_path: str, create_folder: bool = False) -> SPFolder:
@@ -604,11 +865,10 @@ class SharepointManager(SharepointManagerBase):
         >>> manager.set_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", create_folder = True) # Creates folder
         """
 
-        # Change folder to the root folder (we always go from here to the target folder)
-        self.folder = self._get_folder("")
-
         fnames = get_names_to_folder(sp_relative_folder_path)
         if len(fnames) == 0:
+            # Resolve the drive root once and adopt it as the current folder.
+            self.folder = self._get_folder("")
             return self.folder
 
         target_folder = "/".join(fnames)
@@ -620,11 +880,34 @@ class SharepointManager(SharepointManagerBase):
             else:
                 raise SPFolderNotFound(f"SP Folder does not exist: {target_folder}")
 
-        if folder_data is None or folder_data.name != fnames[-1]:
-            self.folder = self._get_folder("")
+        if folder_data is None:
+            raise SPFolderNotFound(f"SP Folder could not be created/resolved: {target_folder}")
+        if folder_data.name != fnames[-1]:
             raise RuntimeError("SP Folder was not set correctly")
         self.folder = folder_data
         return self.folder
+
+    def _list_children(
+        self, folder: SPFolder | None = None
+    ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
+        """Single-pass enumeration of a folder's children.
+
+        Returns ``(files_by_name, folders_by_name)``. Saves a network round
+        trip versus calling :meth:`list_files` and :meth:`list_folders`.
+        """
+        target = folder if folder is not None else self.folder
+        drive_id = self._drive_id
+        url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{target.id}/children"
+        files: dict[str, SPFile] = {}
+        folders: dict[str, SPFolder] = {}
+        for item in self._paginate(url):
+            if "file" in item:
+                f = SPFile.from_dict(item)
+                files[f.name] = f
+            elif "folder" in item:
+                fd = SPFolder.from_dict(item)
+                folders[fd.name] = fd
+        return files, folders
 
     def list_files(self, sp_relative_folder_path: str | None = None) -> dict[str, SPFile]:
         """
@@ -651,15 +934,7 @@ class SharepointManager(SharepointManagerBase):
         if sp_relative_folder_path is not None:
             self.folder = self.set_folder(sp_relative_folder_path)
 
-        drive_id = self._drive_id
-        folder_id = self.folder.id
-        url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_id}/children"
-        files = {}
-        for item in self._paginate(url):
-            if "file" in item:
-                _file = SPFile.from_dict(item)
-                files[_file.name] = _file
-
+        files, _ = self._list_children()
         return files
 
     def list_folders(self, sp_relative_folder_path: str | None = None) -> dict[str, SPFolder]:
@@ -687,15 +962,7 @@ class SharepointManager(SharepointManagerBase):
         if sp_relative_folder_path is not None:
             _ = self.set_folder(sp_relative_folder_path)
 
-        drive_id = self._drive_id
-        folder_id = self.folder.id
-        url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_id}/children"
-        folders = {}
-        for item in self._paginate(url):
-            if "folder" in item:
-                _folder = SPFolder.from_dict(item)
-                folders[_folder.name] = _folder
-
+        _, folders = self._list_children()
         return folders
 
     # ----------------------------------------------------------
@@ -740,21 +1007,32 @@ class SharepointManager(SharepointManagerBase):
         file_size_b = os.path.getsize(local_file_path)
         file_size_mb = file_size_b / (1024 * 1024)
 
-        logging.info(f"Uploading file {file_name} ({file_size_mb:.1f} MB)")
+        logger.info("Uploading file %s (%.1f MB)", file_name, file_size_mb)
 
         with open(local_file_path, "rb") as file:
             site_id = self._site_id
             drive_id = self._drive_id
             folder_id = self.folder.id
-            url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/items/{folder_id}:/{file_name}:/createUploadSession"
+            encoded_name = quote_segment(file_name)
+            url = (
+                f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}"
+                f"/items/{folder_id}:/{encoded_name}:/createUploadSession"
+            )
             request_body = {"@microsoft.graph.conflictBehavior": "replace"}
-            r = self._request("POST", url, headers=self._hdr(), timeout=30, json=request_body)
+            r = self._request(
+                "POST",
+                url,
+                headers=self._hdr(json_content=True),
+                timeout=30,
+                json=request_body,
+            )
             r.raise_for_status()
             upload_session = r.json()
             upload_url = str(upload_session["uploadUrl"])
 
-            chunk_size = 20 * 327680  # 6.25 MiB
+            chunk_size = _UPLOAD_CHUNK_SIZE
             start_byte = 0
+            last_log = 0.0
             try:
                 while True:
                     chunk = file.read(chunk_size)
@@ -783,20 +1061,27 @@ class SharepointManager(SharepointManagerBase):
                         except Exception as e:
                             time.sleep(1)
                             if attempt >= 2:
-                                logging.error(f"Error uploading chunk: {e}")
+                                logger.error("Error uploading chunk: %s", e)
                                 raise e
 
                     start_byte += len(chunk)
-                    logging.info(
-                        f"Uploaded {start_byte / (1024 * 1024):.1f} MiB out of {file_size_b / (1024 * 1024):.1f}"
-                    )
-            finally:
+                    now = time.monotonic()
+                    if now - last_log >= _PROGRESS_LOG_INTERVAL_SEC or start_byte >= file_size_b:
+                        logger.info(
+                            "Uploaded %.1f MiB out of %.1f",
+                            start_byte / (1024 * 1024),
+                            file_size_b / (1024 * 1024),
+                        )
+                        last_log = now
+            except Exception:
+                # Cancel upload session on failure to free server-side state.
                 try:
                     _ = self._request("DELETE", upload_url, timeout=30)
                 except Exception:
                     pass
+                raise
 
-        logging.info("Upload completed.")
+        logger.info("Upload completed.")
 
     def upload_folder(
         self, local_folder_path: str, sp_relative_folder_path: str | None = None
@@ -832,35 +1117,36 @@ class SharepointManager(SharepointManagerBase):
         if not os.path.isdir(local_folder_path):
             raise ValueError(f"Path does not correspond to a folder: {local_folder_path}")
 
+        # Resolve the destination folder (creating it if needed) without
+        # leaking ``self.folder`` mutation to the caller. ``cwd`` restores the
+        # previous folder on exit – even on exception.
         if sp_relative_folder_path is not None:
-            _ = self.set_folder(sp_relative_folder_path, create_folder=True)
+            with self.cwd(sp_relative_folder_path, create_folder=True):
+                base_relative = self.folder.relative_url
+        else:
+            base_relative = self.folder.relative_url
 
-        # Create folder inside of the current Sharepoint folder
-        sp_relative_url = self.folder.relative_url
         new_folder_name = os.path.basename(local_folder_path)
-        sp_folder_path = f"{sp_relative_url}/{new_folder_name}"
-        if len(sp_folder_path) > 0 and sp_folder_path[0] == "/":
-            sp_folder_path = sp_folder_path[1:]
-        logging.info(f"Uploading folder: {self.folder.name}")
-        _ = self.set_folder(sp_folder_path, create_folder=True)
+        sp_folder_path = f"{base_relative}/{new_folder_name}".lstrip("/")
+        logger.info("Uploading folder: %s", new_folder_name)
 
-        list_elements = os.listdir(local_folder_path)
-        # Upload files
-        list_files = [
-            f for f in list_elements if os.path.isfile(os.path.join(local_folder_path, f))
-        ]
-        for file_name in list_files:
-            self.upload_file(os.path.join(local_folder_path, file_name))
+        with os.scandir(local_folder_path) as entries:
+            files: list[str] = []
+            subdirs: list[str] = []
+            for entry in entries:
+                if entry.is_file():
+                    files.append(entry.path)
+                elif entry.is_dir():
+                    subdirs.append(entry.path)
 
-        # Upload folders (recursive)
-        list_folders = [
-            f for f in list_elements if os.path.isdir(os.path.join(local_folder_path, f))
-        ]
-        for folder_name in list_folders:
-            self.upload_folder(
-                os.path.join(local_folder_path, folder_name),
-                f"{sp_folder_path}",
-            )
+        # Switch into the destination folder for this level only; siblings
+        # at the next level recurse via their own ``cwd`` blocks.
+        with self.cwd(sp_folder_path, create_folder=True):
+            for file_path in files:
+                self.upload_file(file_path)
+
+            for subdir_path in subdirs:
+                self.upload_folder(subdir_path, sp_folder_path)
 
     # ----------------------------------------------------------
     # Download files/folders from Sharepoint
@@ -917,23 +1203,35 @@ class SharepointManager(SharepointManagerBase):
         file_size_bytes = int(file_obj.size)
         file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
         download_url = file_obj.download_url
-        logging.info(f"Downloading file {file_obj.name} ({file_size_mbytes} MB)")
+        logger.info("Downloading file %s (%s MB)", file_obj.name, file_size_mbytes)
 
-        chunk_size = 4 * 1024 * 1024
+        chunk_size = _DOWNLOAD_CHUNK_SIZE
         downloaded_bytes = 0
 
         filename = file_obj.name if new_filename is None else new_filename
-        with self._request("GET", download_url, stream=True, timeout=None) as r:
+        target_path = safe_join(local_download_path, filename)
+        last_log = 0.0
+        with self._request("GET", download_url, stream=True, timeout=(10, 300)) as r:
             r.raise_for_status()
-            with open(f"{local_download_path}/{filename}", "wb") as f:
+            with open(target_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=chunk_size):
+                    if not chunk:
+                        continue
                     _ = f.write(chunk)
                     downloaded_bytes += len(chunk)
-                    logging.info(
-                        f"Downloaded {downloaded_bytes / (1024 * 1024):.1f} MiB out of {file_size_bytes / (1024 * 1024):.1f}"
-                    )
+                    now = time.monotonic()
+                    if (
+                        now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
+                        or downloaded_bytes >= file_size_bytes
+                    ):
+                        logger.info(
+                            "Downloaded %.1f MiB out of %.1f",
+                            downloaded_bytes / (1024 * 1024),
+                            file_size_bytes / (1024 * 1024),
+                        )
+                        last_log = now
 
-        logging.info("Download completed.")
+        logger.info("Download completed: %s", file_obj.name)
 
         return file_obj
 
@@ -972,22 +1270,26 @@ class SharepointManager(SharepointManagerBase):
             _ = self.set_folder(sp_relative_folder_path)
 
         # Create local folder
-        logging.info(f"Downloading folder: {self.folder.name}")
         cur_folder = self.folder
-        cur_folder_download_path = os.path.join(local_download_path, cur_folder.name)
+        logger.info("Downloading folder: %s", cur_folder.name)
+        cur_folder_download_path = (
+            safe_join(local_download_path, cur_folder.name)
+            if cur_folder.name
+            else local_download_path
+        )
         os.makedirs(cur_folder_download_path, exist_ok=True)
 
-        # Download Files
-        list_files_names = self.list_files()
-        for file in list_files_names.values():
+        # Single-pass enumeration to halve Graph round-trips per folder.
+        files, subfolders = self._list_children(cur_folder)
+
+        for file in files.values():
             _ = self.download_file(file, cur_folder_download_path)
 
-        # Download folders (recursive)
-        list_folder_names = self.list_folders()
-
-        for folder_name in list_folder_names:
-            folder_srp = f"{cur_folder.relative_url}/{folder_name}"
-            if len(folder_srp) > 0 and folder_srp[0] == "/":
+        # Recurse using the resolved subfolder paths.
+        cur_relative = cur_folder.relative_url
+        for folder_name in subfolders:
+            folder_srp = f"{cur_relative}/{folder_name}" if cur_relative else folder_name
+            if folder_srp.startswith("/"):
                 folder_srp = folder_srp[1:]
             self.download_folder(
                 cur_folder_download_path,
@@ -1032,14 +1334,20 @@ class SharepointManager(SharepointManagerBase):
 
         drive_id = self._drive_id
         item_id = file.id
-        r = requests.delete(
+        r = self._request(
+            "DELETE",
             f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}",
             headers=self._hdr(),
             timeout=30,
         )
         r.raise_for_status()
 
-    def delete_folder(self, folder: str | SPFolder, force_delete: bool = False) -> None:
+    def delete_folder(
+        self,
+        folder: str | SPFolder,
+        force_delete: bool = False,
+        sp_relative_folder_path: str | None = None,
+    ) -> None:
         """
         Delete a SharePoint folder.
 
@@ -1050,6 +1358,10 @@ class SharepointManager(SharepointManagerBase):
             Relative path or folder object.
         force_delete : bool, optional
             If False (default), only empty folders are deleted. If True, delete regardless.
+        sp_relative_folder_path : str, optional
+            Relative path within the document library to scope the operation.
+            If provided, ``set_folder`` is invoked first; ``folder`` is then
+            interpreted relative to that location (when given as a ``str``).
 
 
         Raises
@@ -1068,21 +1380,29 @@ class SharepointManager(SharepointManagerBase):
         >>> manager = SharepointManager(...)
         >>> # Consider that the folder is not empty
         >>> try:
-        >>>     manager.delete_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", force_delete=False)
+        >>>     manager.delete_folder("Folder1/Folder2/Folder3", force_delete=False)
         >>> except SPFolderNotEmpty:
         >>>     logging.info("Sharepoint folder is not empty")
-        >>> manager.delete_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", force_delete=True)
+        >>> manager.delete_folder("Folder1/Folder2/Folder3", force_delete=True)
         """
 
+        # Resolve the target folder without leaking ``self.folder`` mutation.
         if isinstance(folder, str):
-            folder = self.set_folder(folder)
+            scope_path = (
+                f"{sp_relative_folder_path.rstrip('/')}/{folder.lstrip('/')}"
+                if sp_relative_folder_path
+                else folder
+            )
+            with self.cwd(scope_path):
+                target = self.folder
+        else:
+            target = folder
 
-        files = self.list_files()
-        folders = self.list_folders()
+        files, folders = self._list_children(target)
 
         if (len(files) == 0 and len(folders) == 0) or force_delete:
             drive_id = self._drive_id
-            folder_id = folder.id
+            folder_id = target.id
             r = self._request(
                 "DELETE",
                 f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_id}",
