@@ -4,46 +4,57 @@ from typing import Any
 from .utils import camel_to_snake
 
 
-@dataclass
+@dataclass(repr=False)
 class ClientCredential:
     client_id: str
-    client_secret: str
+    client_secret: str = field(repr=False)
+
+    def __repr__(self) -> str:
+        return f"ClientCredential(client_id={self.client_id!r}, client_secret=***)"
 
 
-@dataclass
+@dataclass(repr=False)
 class UserDelegatedCredential:
     client_id: str
     username: str
-    password: str
+    password: str = field(repr=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"UserDelegatedCredential(client_id={self.client_id!r}, "
+            f"username={self.username!r}, password=***)"
+        )
 
 
 @dataclass
 class SPObject:
-    created_datetime: str
     id: str
-    last_modified_datetime: str
-    name: str
-    parent_reference: dict[str, str]
-    web_url: str
-    file_system_info: dict[str, str]
-    size: int
-    created_by: dict[str, dict[str, str]] = field(default_factory=dict)
-    last_modified_by: dict[str, dict[str, str]] = field(default_factory=dict)
-    shared: dict[str, str] = field(default_factory=dict)
+    name: str = ""
+    created_datetime: str | None = None
+    last_modified_datetime: str | None = None
+    parent_reference: dict[str, Any] = field(default_factory=dict)
+    web_url: str = ""
+    file_system_info: dict[str, Any] = field(default_factory=dict)
+    size: int = 0
+    created_by: dict[str, dict[str, Any]] = field(default_factory=dict)
+    last_modified_by: dict[str, dict[str, Any]] = field(default_factory=dict)
+    shared: dict[str, Any] = field(default_factory=dict)
     c_tag: str = ""
     e_tag: str = ""
 
 
 def dataclass_from_dict(cls, data: dict[str, Any], extra_mapping: dict[str, str] | None = None):
     valid_fields = {f.name for f in fields(cls)}
-    normalized = {}
+    # Work on a shallow copy to avoid mutating the caller's dict.
+    working = dict(data)
 
     if extra_mapping:
         for k, v in extra_mapping.items():
-            if k in data:
-                data[v] = data[k]
+            if k in working:
+                working[v] = working[k]
 
-    for k, v in data.items():
+    normalized = {}
+    for k, v in working.items():
         snake = camel_to_snake(k)
         if snake in valid_fields:
             normalized[snake] = v
@@ -73,7 +84,13 @@ class SPFolder(SPObject):
         # include "/" because root url ends with /documents_folder
         parts = (self.web_url + "/").split("/")
         # skip sites, site_name, documents_folder
-        id_start = parts.index("sites") + 3
+        try:
+            id_start = parts.index("sites") + 3
+        except ValueError:
+            try:
+                id_start = parts.index("teams") + 3
+            except ValueError:
+                return ""
         relative_url = "/".join(parts[id_start:])
         if relative_url and relative_url[-1] == "/":
             relative_url = relative_url[:-1]
@@ -82,7 +99,7 @@ class SPFolder(SPObject):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPFolder":
         if "root" in data:
-            data["name"] = ""
+            data = {**data, "name": ""}
         return dataclass_from_dict(cls, data, {"@odata.context": "context"})
 
 

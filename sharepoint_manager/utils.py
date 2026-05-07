@@ -1,5 +1,7 @@
+import os
 import re
 import ntpath
+from urllib.parse import quote
 import base64
 
 
@@ -110,3 +112,66 @@ def get_names_to_folder(target_path: str) -> list[str]:
         return []
     target_path = target_path[:-1] if (target_path[-1] in ["/", "\\"]) else target_path
     return target_path.replace("\\", "/").split("/")
+
+
+def safe_join(base_dir: str, untrusted_name: str) -> str:
+    """
+    Safely join an untrusted filename onto a base directory.
+
+    Strips path separators, NUL bytes and parent-dir references coming from a
+    remote source, then verifies the resulting absolute path stays within
+    ``base_dir``. Raises ``ValueError`` on any attempt to escape.
+    """
+    if not isinstance(untrusted_name, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise ValueError(f"Filename must be a string, got {type(untrusted_name)!r}")
+
+    cleaned = untrusted_name.replace("\x00", "").strip()
+    # Reduce to the basename so that "../etc" becomes "etc"
+    cleaned = ntpath.basename(cleaned)
+    cleaned = os.path.basename(cleaned)
+    if cleaned in ("", ".", "..") or cleaned.startswith("."):
+        # We allow names starting with "." (e.g. ".gitignore") explicitly:
+        if cleaned in ("", ".", ".."):
+            raise ValueError(f"Unsafe filename received from SharePoint: {untrusted_name!r}")
+
+    base_real = os.path.realpath(base_dir)
+    full = os.path.realpath(os.path.join(base_real, cleaned))
+    # Allow the file to be exactly inside base_dir (not above it).
+    if full != base_real and not full.startswith(base_real + os.sep):
+        raise ValueError(f"Path traversal blocked: {untrusted_name!r}")
+    return full
+
+
+def quote_path(path: str) -> str:
+    """URL-encode a forward-slash separated SharePoint relative path."""
+    return quote(path, safe="/")
+
+
+def quote_segment(name: str) -> str:
+    """URL-encode a single SharePoint name segment (no slashes preserved)."""
+    return quote(name, safe="")
+
+
+_AUTH_PARAM_RE = re.compile(r',(?=(?:[^"]*"[^"]*")*[^"]*$)')
+
+
+def parse_www_authenticate(header: str) -> dict[str, str]:
+    """
+    Parse a WWW-Authenticate header value into a {param: value} mapping.
+
+    Tolerates the leading scheme (``Bearer ...``) and quoted values that
+    contain commas. Keys are lower-cased.
+    """
+    if not header:
+        return {}
+    if " " in header:
+        _scheme, _, params = header.partition(" ")
+    else:
+        params = header
+    out: dict[str, str] = {}
+    for part in _AUTH_PARAM_RE.split(params):
+        if "=" not in part:
+            continue
+        k, _, v = part.partition("=")
+        out[k.strip().lower()] = v.strip().strip('"')
+    return out
