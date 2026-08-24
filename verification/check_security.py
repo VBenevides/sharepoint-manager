@@ -14,8 +14,8 @@ msal.ConfidentialClientApplication = _MsalClient
 msal.PublicClientApplication = _MsalClient
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.core import SharepointManagerBase  # noqa: E402
-from sharepoint_manager.exceptions import SPValidationError  # noqa: E402
+from sharepoint_manager.core import SharepointManagerBase
+from sharepoint_manager.exceptions import SPValidationError
 
 
 def main() -> None:

@@ -6,37 +6,36 @@ Module used to interact with sharepoint sites using an approach similar to file 
 # Imports
 # ---------------------------------------------------------------------- #
 
-from typing import Any, Literal
 import base64
-from collections.abc import Iterator
-from contextlib import contextmanager
-from email.utils import parsedate_to_datetime
+import logging
 import os
 import re
 import shutil
-import time
 import threading
-import logging
+import time
 import warnings
-from urllib.parse import urlparse, unquote
+from collections.abc import Iterator
+from contextlib import contextmanager
+from email.utils import parsedate_to_datetime
+from typing import Any, Literal
+from urllib.parse import unquote, urlparse
 
 import requests
-
 from msal import ConfidentialClientApplication, PublicClientApplication
 
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
     SPDeletedItem,
+    SPFile,
+    SPFolder,
     TokenProvider,
     UserDelegatedCredential,
-    SPFolder,
-    SPFile,
 )
 from .exceptions import (
     SPDriveNotFound,
-    SPFolderNotEmpty,
     SPFileNotFound,
+    SPFolderNotEmpty,
     SPFolderNotFound,
     SPUnauthorizedTarget,
     SPValidationError,
@@ -44,10 +43,10 @@ from .exceptions import (
 from .utils import (
     get_filename,
     get_names_to_folder,
-    safe_join,
+    parse_www_authenticate,
     quote_path,
     quote_segment,
-    parse_www_authenticate,
+    safe_join,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,7 +107,7 @@ class SharepointManagerBase:
             # one stored last wins. The very first cached token write will
             # still be observed by readers thanks to the GIL semantics.
             lock = threading.Lock()
-            setattr(self, "_token_lock", lock)
+            self._token_lock = lock
         return lock
 
     # ----------------------------------------------------------
@@ -287,8 +286,8 @@ class SharepointManagerBase:
                 expires_on = now + max(expires_in, 60)
 
             # Cache the token and its expiry
-            setattr(self, "_cached_token", token)
-            setattr(self, "_cached_token_expiry", int(expires_on))
+            self._cached_token = token
+            self._cached_token_expiry = int(expires_on)
 
             return token
 
@@ -340,7 +339,11 @@ class SharepointManagerBase:
                     allow_redirects=allow_redirects,
                 )
             except requests.RequestException:
-                if not retryable or attempt >= max_attempts or time.monotonic() >= deadline:
+                if (
+                    not retryable
+                    or attempt >= max_attempts
+                    or time.monotonic() >= deadline
+                ):
                     raise
                 time.sleep(min(2**attempt, policy.max_retry_after_seconds))
                 attempt += 1
@@ -972,10 +975,10 @@ class SharepointManager(SharepointManagerBase):
         r.raise_for_status()
         return SPFolder.from_dict(r.json())
 
-    def _get_file(self, filename: str) -> SPFile:
+    def _get_file(self, filename: str, folder: SPFolder | None = None) -> SPFile:
         """Fetch a file directly under the current folder by name (O(1) lookup)."""
         drive_id = self._drive_id
-        folder_id = str(self.folder.id)
+        folder_id = str((folder or self.folder).id)
         encoded_name = quote_segment(filename)
         url = f"{self._graph_base_url}/drives/{drive_id}/items/{folder_id}:/{encoded_name}"
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
@@ -1101,6 +1104,25 @@ class SharepointManager(SharepointManagerBase):
             "editor": _extract(file.last_modified_by),
         }
 
+    def _resolve_folder(
+        self, sp_relative_folder_path: str, create_folder: bool = False
+    ) -> SPFolder:
+        fnames = get_names_to_folder(sp_relative_folder_path)
+        if not fnames:
+            return self._get_folder("")
+        target_folder = "/".join(fnames)
+        try:
+            folder_data = self._get_folder(target_folder)
+        except SPFolderNotFound:
+            if not create_folder:
+                raise SPFolderNotFound("SP Folder does not exist")
+            folder_data = self._create_folder(target_folder)
+        if folder_data is None:
+            raise SPFolderNotFound("SP Folder could not be created or resolved")
+        if folder_data.name != fnames[-1]:
+            raise RuntimeError("SP Folder was not resolved correctly")
+        return folder_data
+
     def set_folder(
         self, sp_relative_folder_path: str, create_folder: bool = False
     ) -> SPFolder:
@@ -1138,26 +1160,7 @@ class SharepointManager(SharepointManagerBase):
         >>> manager.set_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", create_folder = True) # Creates folder
         """
 
-        fnames = get_names_to_folder(sp_relative_folder_path)
-        if len(fnames) == 0:
-            # Resolve the drive root once and adopt it as the current folder.
-            self.folder = self._get_folder("")
-            return self.folder
-
-        target_folder = "/".join(fnames)
-        try:
-            folder_data = self._get_folder(target_folder)
-        except SPFolderNotFound:
-            if create_folder:
-                folder_data = self._create_folder(target_folder)
-            else:
-                raise SPFolderNotFound("SP Folder does not exist")
-
-        if folder_data is None:
-            raise SPFolderNotFound("SP Folder could not be created or resolved")
-        if folder_data.name != fnames[-1]:
-            raise RuntimeError("SP Folder was not set correctly")
-        self.folder = folder_data
+        self.folder = self._resolve_folder(sp_relative_folder_path, create_folder)
         return self.folder
 
     def _list_children(
@@ -1577,8 +1580,7 @@ class SharepointManager(SharepointManagerBase):
             folder_srp = (
                 f"{cur_relative}/{folder_name}" if cur_relative else folder_name
             )
-            if folder_srp.startswith("/"):
-                folder_srp = folder_srp[1:]
+            folder_srp = folder_srp.removeprefix("/")
             self.download_folder(
                 cur_folder_download_path,
                 folder_srp,

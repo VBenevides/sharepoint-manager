@@ -1,7 +1,8 @@
-from dataclasses import dataclass, fields, field
 import math
-from urllib.parse import unquote, urlsplit
+from dataclasses import dataclass, field, fields
 from typing import Any, Protocol
+from urllib.parse import unquote, urlsplit
+
 from .utils import camel_to_snake
 
 

@@ -8,7 +8,7 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.core import SharepointManager  # noqa: E402
+from sharepoint_manager.core import SharepointManager
 
 
 class Response:
@@ -36,7 +36,9 @@ def main() -> None:
         ),
         "https://graph.microsoft.com/v1.0/delta?p=2": Response(
             {
-                "value": [{"id": "gone", "deleted": {"state": "deleted"}, "name": "old.txt"}],
+                "value": [
+                    {"id": "gone", "deleted": {"state": "deleted"}, "name": "old.txt"}
+                ],
                 "@odata.deltaLink": "https://graph.microsoft.com/v1.0/delta?token=done",
             }
         ),

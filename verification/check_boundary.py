@@ -9,9 +9,9 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.core import SharepointManagerBase  # noqa: E402
-from sharepoint_manager.dataclasses import SPFile, SPFolder  # noqa: E402
-from sharepoint_manager.exceptions import SPUnauthorizedTarget  # noqa: E402
+from sharepoint_manager.core import SharepointManagerBase
+from sharepoint_manager.dataclasses import SPFile, SPFolder
+from sharepoint_manager.exceptions import SPUnauthorizedTarget
 
 
 def main() -> None:

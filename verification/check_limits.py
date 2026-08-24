@@ -1,6 +1,6 @@
-from pathlib import Path
 import sys
 import types
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -9,8 +9,8 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.dataclasses import OperationPolicy  # noqa: E402
-from sharepoint_manager.utils import validate_archive_members  # noqa: E402
+from sharepoint_manager.dataclasses import OperationPolicy
+from sharepoint_manager.utils import validate_archive_members
 
 
 def main() -> None:

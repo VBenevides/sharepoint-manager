@@ -8,8 +8,8 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.core import SharepointManager  # noqa: E402
-from sharepoint_manager.dataclasses import OperationPolicy  # noqa: E402
+from sharepoint_manager.core import SharepointManager
+from sharepoint_manager.dataclasses import OperationPolicy
 
 
 class Response:
@@ -36,15 +36,23 @@ def main() -> None:
     manager.tenant_url = "https://tenant.sharepoint.com"
     manager.policy = OperationPolicy(max_retry_attempts=3, max_retry_after_seconds=0.01)
     manager._session = session
-    import sharepoint_manager.core as core
+    from sharepoint_manager import core
 
     original_sleep = core.time.sleep
     core.time.sleep = lambda _: None
     try:
-        manager._request("POST", "https://graph.microsoft.com/v1.0/items", headers={"Authorization": "Bearer token"})
+        manager._request(
+            "POST",
+            "https://graph.microsoft.com/v1.0/items",
+            headers={"Authorization": "Bearer token"},
+        )
         assert session.calls == ["POST"]
         session.calls.clear()
-        manager._request("GET", "https://graph.microsoft.com/v1.0/items", headers={"Authorization": "Bearer token"})
+        manager._request(
+            "GET",
+            "https://graph.microsoft.com/v1.0/items",
+            headers={"Authorization": "Bearer token"},
+        )
         assert session.calls == ["GET", "GET", "GET"]
     finally:
         core.time.sleep = original_sleep
