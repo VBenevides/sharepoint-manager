@@ -24,7 +24,6 @@ import requests
 
 from msal import ConfidentialClientApplication, PublicClientApplication
 
-from .decorators import retry_if_not_exception, retry
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
@@ -58,6 +57,7 @@ logger = logging.getLogger(__name__)
 _PROGRESS_LOG_INTERVAL_SEC = 2.0
 # Statuses that should be retried in addition to 429.
 _RETRY_STATUSES = (429, 500, 502, 503, 504)
+_RETRY_METHODS = {"GET", "HEAD", "OPTIONS", "PUT"}
 # Microsoft Graph upload chunks must be a multiple of 320 KiB.
 _GRAPH_CHUNK_UNIT = 327680
 # ~6.25 MiB upload chunk – within Graph's 5–10 MiB recommendation.
@@ -320,21 +320,31 @@ class SharepointManagerBase:
             self._validate_capability_url(url)
         if allow_redirects is None:
             allow_redirects = not authenticated
+        method = method.upper()
+        retryable = method in _RETRY_METHODS
         attempt = 1
         policy = getattr(self, "policy", OperationPolicy())
-        max_attempts = min(max_attempts, policy.max_retry_attempts)
+        max_attempts = min(max_attempts, policy.max_retry_attempts) if retryable else 1
+        deadline = time.monotonic() + policy.wall_clock_seconds
         while True:
-            resp = self._session.request(
-                method=method,
-                url=url,
-                headers=headers,
-                timeout=timeout,
-                json=json,
-                data=data,
-                params=params,
-                stream=stream,
-                allow_redirects=allow_redirects,
-            )
+            try:
+                resp = self._session.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    timeout=timeout,
+                    json=json,
+                    data=data,
+                    params=params,
+                    stream=stream,
+                    allow_redirects=allow_redirects,
+                )
+            except requests.RequestException:
+                if not retryable or attempt >= max_attempts or time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(2**attempt, policy.max_retry_after_seconds))
+                attempt += 1
+                continue
             if authenticated and 300 <= resp.status_code < 400:
                 resp.close()
                 raise SPValidationError("Authenticated Graph redirects are not allowed")
@@ -363,7 +373,11 @@ class SharepointManagerBase:
                             delay = None
                 if delay is None:
                     delay = float(min(2**attempt, 60))
-                delay = min(delay, policy.max_retry_after_seconds)
+                delay = min(
+                    delay,
+                    policy.max_retry_after_seconds,
+                    max(0.0, deadline - time.monotonic()),
+                )
                 # Release any streamed body before sleeping to avoid leaking
                 # connections back to the pool in CLOSE_WAIT.
                 try:
@@ -974,7 +988,6 @@ class SharepointManager(SharepointManagerBase):
             raise SPFileNotFound("SP file not found")
         return SPFile.from_dict(data)
 
-    @retry(attempts=4, exceptions=Exception)
     def _create_single_folder(self, parent_id: str, folder_name: str) -> SPFolder:
         """Create a single child folder under ``parent_id``.
 
@@ -1088,7 +1101,6 @@ class SharepointManager(SharepointManagerBase):
             "editor": _extract(file.last_modified_by),
         }
 
-    @retry_if_not_exception(attempts=3, exceptions=(SPFolderNotFound))
     def set_folder(
         self, sp_relative_folder_path: str, create_folder: bool = False
     ) -> SPFolder:
@@ -1234,7 +1246,6 @@ class SharepointManager(SharepointManagerBase):
     # Upload files/folders to Sharepoint
     # ----------------------------------------------------------
 
-    @retry_if_not_exception(attempts=3, exceptions=(FileNotFoundError))
     def upload_file(
         self, local_file_path: str, sp_relative_folder_path: str | None = None
     ) -> None:
@@ -1319,22 +1330,14 @@ class SharepointManager(SharepointManagerBase):
                         "Content-Range": content_range,
                     }
 
-                    for attempt in range(3):
-                        try:
-                            response = self._request(
-                                "PUT",
-                                upload_url,
-                                headers=chunk_headers,
-                                timeout=60,
-                                data=chunk,
-                            )
-                            response.raise_for_status()
-                            break
-                        except Exception as e:
-                            time.sleep(1)
-                            if attempt >= 2:
-                                logger.error("Error uploading chunk")
-                                raise e
+                    response = self._request(
+                        "PUT",
+                        upload_url,
+                        headers=chunk_headers,
+                        timeout=60,
+                        data=chunk,
+                    )
+                    response.raise_for_status()
 
                     start_byte += len(chunk)
                     now = time.monotonic()
@@ -1434,7 +1437,6 @@ class SharepointManager(SharepointManagerBase):
     # Download files/folders from Sharepoint
     # ----------------------------------------------------------
 
-    @retry_if_not_exception(attempts=3, exceptions=(SPFileNotFound))
     def download_file(
         self,
         file: str | SPFile,
@@ -1519,7 +1521,6 @@ class SharepointManager(SharepointManagerBase):
 
         return file_obj
 
-    @retry_if_not_exception(attempts=3, exceptions=(SPFolderNotFound, SPFileNotFound))
     def download_folder(
         self,
         local_download_path: str,
