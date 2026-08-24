@@ -400,8 +400,12 @@ class SharepointManagerBase:
         seen: set[str] = set()
         page_count = 0
         item_count = 0
+        started = time.monotonic()
         while next_url:
-            if page_count >= getattr(self, "policy", OperationPolicy()).max_pages:
+            policy = getattr(self, "policy", OperationPolicy())
+            if time.monotonic() - started > policy.wall_clock_seconds:
+                raise SPValidationError("Graph pagination deadline exceeded")
+            if page_count >= policy.max_pages:
                 raise SPValidationError("Graph page budget exceeded")
             if next_url in seen:
                 raise SPValidationError("Repeated Graph pagination link")
@@ -415,7 +419,7 @@ class SharepointManagerBase:
             page_count += 1
             for item in data.get("value", []):
                 item_count += 1
-                if item_count > getattr(self, "policy", OperationPolicy()).max_items:
+                if item_count > policy.max_items:
                     raise SPValidationError("Graph item budget exceeded")
                 yield item
             next_url = data.get("@odata.nextLink")
@@ -792,8 +796,15 @@ class SharepointManager(SharepointManagerBase):
         deleted: list[SPDeletedItem] = []
         latest_delta_link: str | None = None
         page_count = 0
+        item_count = 0
+        started = time.monotonic()
 
         while next_url:
+            policy = getattr(self, "policy", OperationPolicy())
+            if time.monotonic() - started > policy.wall_clock_seconds:
+                raise SPValidationError("Delta deadline exceeded")
+            if page_count >= policy.max_pages:
+                raise SPValidationError("Delta page budget exceeded")
             if next_url in seen:
                 raise SPValidationError("Repeated Graph delta link")
             seen.add(next_url)
@@ -805,6 +816,9 @@ class SharepointManager(SharepointManagerBase):
 
             payload = response.json()
             for item in payload.get("value", []):
+                item_count += 1
+                if item_count > policy.max_items:
+                    raise SPValidationError("Delta item budget exceeded")
                 if "deleted" in item:
                     deleted.append(SPDeletedItem.from_dict(item))
                 elif "file" in item:
@@ -813,6 +827,8 @@ class SharepointManager(SharepointManagerBase):
                     folders.append(SPFolder.from_dict(item))
 
             latest_delta_link = payload.get("@odata.deltaLink", latest_delta_link)
+            if latest_delta_link is not None:
+                self._validate_graph_url(latest_delta_link)
             next_url = payload.get("@odata.nextLink")
             page_count += 1
 

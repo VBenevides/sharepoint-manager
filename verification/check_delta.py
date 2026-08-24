@@ -25,7 +25,9 @@ class Response:
 def main() -> None:
     manager = object.__new__(SharepointManager)
     manager.graph_host = "graph.microsoft.com"
-    manager.policy = types.SimpleNamespace(max_pages=10, max_items=10)
+    manager.policy = types.SimpleNamespace(
+        max_pages=10, max_items=10, wall_clock_seconds=60
+    )
     manager._hdr = lambda: {"Authorization": "Bearer token"}
     pages = {
         "https://graph.microsoft.com/v1.0/delta": Response(
