@@ -1,4 +1,10 @@
-__version__ = "0.0.8"
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
+try:
+    __version__ = version("sharepoint_manager")
+except PackageNotFoundError:
+    __version__ = Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip()
 
 # Import core components
 from .core import SharepointManager

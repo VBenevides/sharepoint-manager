@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sharepoint_manager"
+dynamic = ["version"]
+description = "Library for interacting with SharePoint using Microsoft Graph API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Vinicius Benevides", email = "viniciusm.benevides@gmail.com"}]
+dependencies = ["msal>=1.28,<2", "requests>=2.31,<3"]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
+
+[tool.setuptools.packages.find]
+include = ["sharepoint_manager*"]

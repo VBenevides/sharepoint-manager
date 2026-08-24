@@ -4,16 +4,12 @@ Build wheel
 Use: python setup.py bdist_wheel
 """
 
+from pathlib import Path
+
 from setuptools import setup
 
+version = Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip()
+
 _ = setup(
-    name="sharepoint_manager",
-    version="0.0.8",
-    packages=["sharepoint_manager"],
-    url="https://github.com/VBenevides/sharepoint-manager",
-    license="MIT",
-    author="Vinicius Benevides",
-    author_email="viniciusm.benevides@gmail.com",
-    description="Library for interacting with sharepoint using Microsoft Graph API",
-    install_requires=["msal"],
+    version=version,
 )
