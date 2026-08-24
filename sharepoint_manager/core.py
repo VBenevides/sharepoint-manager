@@ -336,7 +336,10 @@ class SharepointManagerBase:
         elif url != self.tenant_url:
             self._validate_capability_url(url)
         if allow_redirects is None:
-            allow_redirects = not authenticated
+            allow_redirects = (
+                not authenticated
+                and getattr(self, "policy", OperationPolicy()).allow_capability_redirects
+            )
         method = method.upper()
         retryable = method in _RETRY_METHODS
         attempt = 1
