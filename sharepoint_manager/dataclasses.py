@@ -176,6 +176,11 @@ class SPFile(SPObject):
     download_url: str = ""
     file: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def quick_xor_hash(self) -> str:
+        hashes = self.file.get("hashes", {})
+        return str(hashes.get("quickXorHash", "")) if isinstance(hashes, dict) else ""
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPFile":
         return dataclass_from_dict(

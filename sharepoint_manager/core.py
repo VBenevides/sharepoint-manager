@@ -43,6 +43,7 @@ from .exceptions import (
     SPFolderNotEmpty,
     SPFolderNotFound,
     SPGraphError,
+    SPFileIntegrityError,
     SPThrottledError,
     SPUnauthorizedTarget,
     SPValidationError,
@@ -54,6 +55,7 @@ from .utils import (
     quote_path,
     quote_segment,
     safe_join,
+    QuickXorHash,
 )
 
 logger = logging.getLogger(__name__)
@@ -1150,6 +1152,7 @@ class SharepointManager(SharepointManagerBase):
         directory = os.path.dirname(target_path) or "."
         fd, temporary_path = tempfile.mkstemp(prefix=".sp-download-", dir=directory)
         downloaded_bytes = 0
+        digest = QuickXorHash()
         try:
             with os.fdopen(fd, "wb") as output:
                 with self._request(
@@ -1159,9 +1162,13 @@ class SharepointManager(SharepointManagerBase):
                     for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
                         if chunk:
                             output.write(chunk)
+                            digest.update(chunk)
                             downloaded_bytes += len(chunk)
             if downloaded_bytes != int(file_obj.size):
                 raise SPValidationError("Downloaded content was incomplete")
+            expected_hash = file_obj.quick_xor_hash
+            if expected_hash and digest.b64digest() != expected_hash:
+                raise SPFileIntegrityError("Downloaded content failed integrity verification")
             os.replace(temporary_path, target_path)
         except Exception:
             try:
