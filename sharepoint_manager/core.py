@@ -252,10 +252,7 @@ class SharepointManagerBase:
                 )
 
             if not isinstance(result, dict) or "access_token" not in result.keys():
-                error = result
-                if isinstance(result, dict):
-                    error = result.get("error_description", result)
-                raise RuntimeError(f"Authentication failed: {error}")
+                raise RuntimeError("Authentication failed")
 
             token = str(result["access_token"])
             # Prefer 'expires_on' (epoch seconds as str) else compute from 'expires_in'
@@ -323,6 +320,9 @@ class SharepointManagerBase:
             if authenticated and 300 <= resp.status_code < 400:
                 resp.close()
                 raise SPValidationError("Authenticated Graph redirects are not allowed")
+            request_id = resp.headers.get("request-id") or resp.headers.get("client-request-id")
+            if request_id:
+                logger.debug("Graph request status=%s request_id=%s", resp.status_code, request_id)
             # Handle throttling / transient 5xx with Retry-After.
             if resp.status_code in _RETRY_STATUSES and attempt < max_attempts:
                 retry_after = resp.headers.get("Retry-After")
@@ -624,7 +624,7 @@ class SharepointManager(SharepointManagerBase):
         self._check_file_budget(file_size_bytes, local_download_path)
         file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
         download_url = file_obj.download_url
-        logger.info("Downloading file %s (%s MB)", file_obj.name, file_size_mbytes)
+        logger.info("Downloading file (%s MB)", file_size_mbytes)
 
         chunk_size = _DOWNLOAD_CHUNK_SIZE
         downloaded_bytes = 0
@@ -652,7 +652,7 @@ class SharepointManager(SharepointManagerBase):
                         )
                         last_log = now
 
-        logger.info("Download completed: %s", file_obj.name)
+        logger.info("Download completed")
 
         return file_obj
 
@@ -919,7 +919,7 @@ class SharepointManager(SharepointManagerBase):
         )
 
         if r.status_code == 404:
-            raise SPFolderNotFound(f"SP Folder not found: {folder_path}")
+            raise SPFolderNotFound("SP Folder not found")
         r.raise_for_status()
         return SPFolder.from_dict(r.json())
 
@@ -933,12 +933,12 @@ class SharepointManager(SharepointManagerBase):
         )
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
         if r.status_code == 404:
-            raise SPFileNotFound(f"SP file not found: {filename}")
+            raise SPFileNotFound("SP file not found")
         r.raise_for_status()
         data = r.json()
         if "file" not in data:
             # Path resolved to a folder, not a file.
-            raise SPFileNotFound(f"SP file not found (path is a folder): {filename}")
+            raise SPFileNotFound("SP file not found")
         return SPFile.from_dict(data)
 
     @retry(attempts=4, exceptions=Exception)
@@ -1091,10 +1091,10 @@ class SharepointManager(SharepointManagerBase):
             if create_folder:
                 folder_data = self._create_folder(target_folder)
             else:
-                raise SPFolderNotFound(f"SP Folder does not exist: {target_folder}")
+                raise SPFolderNotFound("SP Folder does not exist")
 
         if folder_data is None:
-            raise SPFolderNotFound(f"SP Folder could not be created/resolved: {target_folder}")
+            raise SPFolderNotFound("SP Folder could not be created or resolved")
         if folder_data.name != fnames[-1]:
             raise RuntimeError("SP Folder was not set correctly")
         self.folder = folder_data
@@ -1223,7 +1223,7 @@ class SharepointManager(SharepointManagerBase):
         self._check_file_budget(file_size_b)
         file_size_mb = file_size_b / (1024 * 1024)
 
-        logger.info("Uploading file %s (%.1f MB)", file_name, file_size_mb)
+        logger.info("Uploading file (%.1f MB)", file_size_mb)
 
         with open(local_file_path, "rb") as file:
             site_id = self._site_id
@@ -1277,7 +1277,7 @@ class SharepointManager(SharepointManagerBase):
                         except Exception as e:
                             time.sleep(1)
                             if attempt >= 2:
-                                logger.error("Error uploading chunk: %s", e)
+                                logger.error("Error uploading chunk")
                                 raise e
 
                     start_byte += len(chunk)
@@ -1347,7 +1347,7 @@ class SharepointManager(SharepointManagerBase):
 
         new_folder_name = os.path.basename(local_folder_path)
         sp_folder_path = f"{base_relative}/{new_folder_name}".lstrip("/")
-        logger.info("Uploading folder: %s", new_folder_name)
+        logger.info("Uploading folder")
 
         with os.scandir(local_folder_path) as entries:
             files: list[str] = []
@@ -1426,7 +1426,7 @@ class SharepointManager(SharepointManagerBase):
         self._check_file_budget(file_size_bytes, local_download_path)
         file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
         download_url = file_obj.download_url
-        logger.info("Downloading file %s (%s MB)", file_obj.name, file_size_mbytes)
+        logger.info("Downloading file (%s MB)", file_size_mbytes)
 
         chunk_size = _DOWNLOAD_CHUNK_SIZE
         downloaded_bytes = 0
@@ -1454,7 +1454,7 @@ class SharepointManager(SharepointManagerBase):
                         )
                         last_log = now
 
-        logger.info("Download completed: %s", file_obj.name)
+        logger.info("Download completed")
 
         return file_obj
 
@@ -1495,7 +1495,7 @@ class SharepointManager(SharepointManagerBase):
 
         # Create local folder
         cur_folder = self.folder
-        logger.info("Downloading folder: %s", cur_folder.name)
+        logger.info("Downloading folder")
         cur_folder_download_path = (
             safe_join(local_download_path, cur_folder.name)
             if cur_folder.name
