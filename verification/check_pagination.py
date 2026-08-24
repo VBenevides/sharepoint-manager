@@ -26,6 +26,9 @@ class Response:
     def raise_for_status(self):
         return None
 
+    def close(self):
+        return None
+
 
 def manager(pages, policy=None):
     obj = object.__new__(SharepointManager)

@@ -112,6 +112,13 @@ class SharepointManagerBase:
             self._token_lock = lock
         return lock
 
+    def _get_request_lock(self) -> threading.Lock:
+        lock = getattr(self, "_request_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            setattr(self, "_request_lock", lock)
+        return lock
+
     # ----------------------------------------------------------
     # Support Methods
     # ----------------------------------------------------------
@@ -311,6 +318,8 @@ class SharepointManagerBase:
         authenticated: bool | None = None,
         allow_redirects: bool | None = None,
     ) -> requests.Response:
+        if getattr(self, "_closed", False):
+            raise SPValidationError("SharePoint manager is closed")
         if authenticated is None:
             authenticated = bool(
                 headers and str(headers.get("Authorization", "")).startswith("Bearer ")
@@ -329,17 +338,19 @@ class SharepointManagerBase:
         deadline = time.monotonic() + policy.wall_clock_seconds
         while True:
             try:
-                resp = self._session.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    timeout=timeout,
-                    json=json,
-                    data=data,
-                    params=params,
-                    stream=stream,
-                    allow_redirects=allow_redirects,
-                )
+                # ponytail: one request lock; add per-session pooling only if measured throughput needs it.
+                with self._get_request_lock():
+                    resp = self._session.request(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        timeout=timeout,
+                        json=json,
+                        data=data,
+                        params=params,
+                        stream=stream,
+                        allow_redirects=allow_redirects,
+                    )
             except requests.RequestException:
                 if (
                     not retryable
@@ -415,7 +426,10 @@ class SharepointManagerBase:
                 "GET", next_url, headers=self._hdr(), timeout=30, authenticated=True
             )
             r.raise_for_status()
-            data = r.json()
+            try:
+                data = r.json()
+            finally:
+                r.close()
             page_count += 1
             for item in data.get("value", []):
                 item_count += 1
@@ -461,6 +475,7 @@ class SharepointManager(SharepointManagerBase):
         tenant_id: str | None = None,
         token_provider: TokenProvider | None = None,
         policy: OperationPolicy | None = None,
+        session: requests.Session | None = None,
     ) -> None:
         """
         Initializes the SharepointManager with a given SharePoint URL and credentials.
@@ -501,7 +516,10 @@ class SharepointManager(SharepointManagerBase):
             )
         self._graph_base_url = f"https://{self.graph_host}/v1.0"
         self.policy = policy or OperationPolicy()
-        self._session: requests.Session = requests.Session()
+        self._session: requests.Session = session or requests.Session()
+        self._owns_session = session is None
+        self._closed = False
+        self._close_lock = threading.Lock()
         self.credentials = credentials
         self._token_provider = token_provider
 
@@ -562,13 +580,18 @@ class SharepointManager(SharepointManagerBase):
 
     def close(self) -> None:
         """Release the underlying HTTP session."""
-        provider = getattr(self, "_token_provider", None)
-        if provider is not None and hasattr(provider, "close"):
-            provider.close()
-        try:
-            self._session.close()
-        except Exception:
-            pass
+        with getattr(self, "_close_lock", threading.Lock()):
+            if getattr(self, "_closed", False):
+                return
+            self._closed = True
+            provider = getattr(self, "_token_provider", None)
+            if provider is not None and hasattr(provider, "close"):
+                provider.close()
+            if getattr(self, "_owns_session", True):
+                try:
+                    self._session.close()
+                except Exception:
+                    pass
 
     def __enter__(self) -> "SharepointManager":
         return self
@@ -814,7 +837,10 @@ class SharepointManager(SharepointManagerBase):
             )
             response.raise_for_status()
 
-            payload = response.json()
+            try:
+                payload = response.json()
+            finally:
+                response.close()
             for item in payload.get("value", []):
                 item_count += 1
                 if item_count > policy.max_items:
