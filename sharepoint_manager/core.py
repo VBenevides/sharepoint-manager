@@ -18,7 +18,7 @@ import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -1150,28 +1150,31 @@ class SharepointManager(SharepointManagerBase):
                 "Folder depth exceeds the configured traversal budget"
             )
 
+    def _stream_download(self, file_obj: SPFile, output: BinaryIO) -> None:
+        downloaded_bytes = 0
+        digest = QuickXorHash()
+        with self._request(
+            "GET", file_obj.download_url, stream=True, timeout=(10, 300)
+        ) as response:
+            self._raise_for_status(response)
+            for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
+                if chunk:
+                    output.write(chunk)
+                    digest.update(chunk)
+                    downloaded_bytes += len(chunk)
+        if downloaded_bytes != int(file_obj.size):
+            raise SPValidationError("Downloaded content was incomplete")
+        expected_hash = file_obj.quick_xor_hash
+        if expected_hash and digest.b64digest() != expected_hash:
+            raise SPFileIntegrityError("Downloaded content failed integrity verification")
+
     def _download_to_path(self, file_obj: SPFile, target_path: str) -> None:
         """Stream to a sibling temporary file and atomically replace the target."""
         directory = os.path.dirname(target_path) or "."
         fd, temporary_path = tempfile.mkstemp(prefix=".sp-download-", dir=directory)
-        downloaded_bytes = 0
-        digest = QuickXorHash()
         try:
             with os.fdopen(fd, "wb") as output:
-                with self._request(
-                    "GET", file_obj.download_url, stream=True, timeout=(10, 300)
-                ) as response:
-                    self._raise_for_status(response)
-                    for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
-                        if chunk:
-                            output.write(chunk)
-                            digest.update(chunk)
-                            downloaded_bytes += len(chunk)
-            if downloaded_bytes != int(file_obj.size):
-                raise SPValidationError("Downloaded content was incomplete")
-            expected_hash = file_obj.quick_xor_hash
-            if expected_hash and digest.b64digest() != expected_hash:
-                raise SPFileIntegrityError("Downloaded content failed integrity verification")
+                self._stream_download(file_obj, output)
             os.replace(temporary_path, target_path)
         except Exception:
             try:
@@ -1179,6 +1182,57 @@ class SharepointManager(SharepointManagerBase):
             except FileNotFoundError:
                 pass
             raise
+
+    def download_fileobj(
+        self,
+        file: str | SPFile,
+        destination: BinaryIO,
+        sp_relative_folder_path: str | None = None,
+    ) -> SPFile:
+        """Stream a file into a caller-owned binary object."""
+        if not hasattr(destination, "write"):
+            raise TypeError("destination must be a writable binary file object")
+        if isinstance(file, str):
+            folder = (
+                self._resolve_folder(sp_relative_folder_path)
+                if sp_relative_folder_path is not None
+                else self.folder
+            )
+            file_obj = self._get_file(file, folder)
+        else:
+            file_obj = file
+            self._validate_file_boundary(file_obj)
+        self._check_file_budget(int(file_obj.size))
+        self._stream_download(file_obj, destination)
+        return file_obj
+
+    def upload_fileobj(
+        self,
+        source: BinaryIO,
+        filename: str,
+        sp_relative_folder_path: str | None = None,
+        conflict_behavior: Literal["fail", "replace", "rename"] = "replace",
+        _folder: SPFolder | None = None,
+    ) -> SPFile:
+        """Upload a caller-owned binary object through the normal upload path."""
+        if not hasattr(source, "read"):
+            raise TypeError("source must be a readable binary file object")
+        if not filename or os.path.basename(filename) != filename:
+            raise SPValidationError("filename must be a plain file name")
+        with tempfile.TemporaryDirectory(prefix="sp-upload-") as directory:
+            path = safe_join(directory, filename)
+            total = 0
+            with open(path, "wb") as output:
+                while chunk := source.read(_DOWNLOAD_CHUNK_SIZE):
+                    total += len(chunk)
+                    self._check_file_budget(total)
+                    output.write(chunk)
+            return self.upload_file(
+                path,
+                sp_relative_folder_path,
+                _folder=_folder,
+                conflict_behavior=conflict_behavior,
+            )
 
     def get_file_author(self, file: SPFile) -> dict[str, dict[str, str]]:
         """

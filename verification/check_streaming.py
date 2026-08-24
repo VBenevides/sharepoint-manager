@@ -1,0 +1,49 @@
+import io
+import sys
+import types
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+msal = types.ModuleType("msal")
+msal.ConfidentialClientApplication = type("Confidential", (), {})
+msal.PublicClientApplication = type("Public", (), {})
+sys.modules.setdefault("msal", msal)
+
+from sharepoint_manager.core import SharepointManager  # noqa: E402
+from sharepoint_manager.dataclasses import OperationPolicy, SPFile  # noqa: E402
+
+
+class NonSeekable(io.BytesIO):
+    def seekable(self):
+        return False
+
+    def seek(self, *args):
+        raise OSError("not seekable")
+
+
+def main() -> None:
+    manager = object.__new__(SharepointManager)
+    manager.policy = OperationPolicy(max_file_bytes=100, max_total_bytes=100, max_disk_bytes=100)
+    manager.folder = types.SimpleNamespace(id="folder")
+    manager._check_file_budget = lambda size, destination=None: None
+    manager._validate_file_boundary = lambda file: None
+    downloaded = SPFile(id="file", name="file.txt", size=3)
+    manager._get_file = lambda name, folder: downloaded
+    manager._stream_download = lambda file, output: output.write(b"abc")
+    output = io.BytesIO()
+    assert manager.download_fileobj("file.txt", output).id == "file"
+    assert output.getvalue() == b"abc"
+
+    captured = {}
+
+    def upload(path, *args, **kwargs):
+        captured["data"] = Path(path).read_bytes()
+        return SPFile(id="uploaded", name="data.bin")
+
+    manager.upload_file = upload
+    assert manager.upload_fileobj(NonSeekable(b"data"), "data.bin").id == "uploaded"
+    assert captured["data"] == b"data"
+
+
+if __name__ == "__main__":
+    main()
