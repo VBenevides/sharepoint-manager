@@ -8,7 +8,7 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.core import SharepointManager  # noqa: E402
+from sharepoint_manager.core import SharepointManager
 
 
 class Resource:

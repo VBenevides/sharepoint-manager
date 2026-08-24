@@ -15,10 +15,10 @@ import tempfile
 import threading
 import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
-from typing import Any, BinaryIO, Callable, Literal
+from typing import Any, BinaryIO, Literal
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -27,8 +27,8 @@ from msal import ConfidentialClientApplication, PublicClientApplication
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
-    SPDeletedItem,
     SPCollectionPage,
+    SPDeletedItem,
     SPDeltaPage,
     SPFile,
     SPFolder,
@@ -36,28 +36,28 @@ from .dataclasses import (
     UserDelegatedCredential,
 )
 from .exceptions import (
-    SPDriveNotFound,
     SPAmbiguousWriteError,
     SPAuthenticationError,
     SPAuthorizationError,
     SPConflictError,
+    SPDriveNotFound,
+    SPFileIntegrityError,
     SPFileNotFound,
     SPFolderNotEmpty,
     SPFolderNotFound,
     SPGraphError,
-    SPFileIntegrityError,
     SPThrottledError,
     SPUnauthorizedTarget,
     SPValidationError,
 )
 from .utils import (
+    QuickXorHash,
     get_filename,
     get_names_to_folder,
     parse_www_authenticate,
     quote_path,
     quote_segment,
     safe_join,
-    QuickXorHash,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,7 +125,7 @@ class SharepointManagerBase:
         lock = getattr(self, "_request_lock", None)
         if lock is None:
             lock = threading.Lock()
-            setattr(self, "_request_lock", lock)
+            self._request_lock = lock
         return lock
 
     def _emit_telemetry(self, event: str, **fields: Any) -> None:
@@ -218,7 +218,9 @@ class SharepointManagerBase:
     def _validate_object_boundary(self, obj: SPFile | SPFolder) -> None:
         drive_id = obj.parent_reference.get("driveId")
         site_id = obj.parent_reference.get("siteId")
-        if drive_id != self._drive_id or (site_id is not None and site_id != self._site_id):
+        if drive_id != self._drive_id or (
+            site_id is not None and site_id != self._site_id
+        ):
             raise SPUnauthorizedTarget(
                 "File is outside the configured SharePoint boundary"
             )
@@ -353,7 +355,9 @@ class SharepointManagerBase:
         if allow_redirects is None:
             allow_redirects = (
                 not authenticated
-                and getattr(self, "policy", OperationPolicy()).allow_capability_redirects
+                and getattr(
+                    self, "policy", OperationPolicy()
+                ).allow_capability_redirects
             )
         method = method.upper()
         retryable = method in _RETRY_METHODS
@@ -614,7 +618,9 @@ class SharepointManagerBase:
                 has_checkpoint=checkpoint is not None,
             )
             next_url = next_page
-            yield SPDeltaPage(tuple(files), tuple(folders), tuple(deleted), next_page, checkpoint)
+            yield SPDeltaPage(
+                tuple(files), tuple(folders), tuple(deleted), next_page, checkpoint
+            )
 
 
 class SharepointManager(SharepointManagerBase):
@@ -858,7 +864,11 @@ class SharepointManager(SharepointManagerBase):
 
     def create_folder_from_url(self, url: str, name: str) -> SPFolder:
         """Create one child folder below an approved SharePoint folder URL."""
-        if not isinstance(name, str) or not name.strip() or any(c in name for c in "/\\\0"):
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or any(c in name for c in "/\\\0")
+        ):
             raise SPValidationError("Folder name must be one safe path segment")
         parent = self.get_folder_metadata_from_url(url)
         response = self._request(
@@ -880,21 +890,27 @@ class SharepointManager(SharepointManagerBase):
 
     def delete_folder_from_url(self, url: str, force_delete: bool = False) -> None:
         """Delete an approved SharePoint folder, requiring emptiness by default."""
-        self.delete_folder(self.get_folder_metadata_from_url(url), force_delete=force_delete)
+        self.delete_folder(
+            self.get_folder_metadata_from_url(url), force_delete=force_delete
+        )
 
     def get_folder_permissions_from_url(self, url: str) -> tuple[dict[str, Any], ...]:
         """Return normalized permissions without making an authorization decision."""
         folder = self.get_folder_metadata_from_url(url)
-        permission_url = (
-            f"{self._graph_base_url}/drives/{self._drive_id}/items/{folder.id}/permissions"
+        permission_url = f"{self._graph_base_url}/drives/{self._drive_id}/items/{folder.id}/permissions"
+        return tuple(
+            self._normalize_permission(item) for item in self._paginate(permission_url)
         )
-        return tuple(self._normalize_permission(item) for item in self._paginate(permission_url))
 
     @staticmethod
     def _normalize_permission(permission: dict[str, Any]) -> dict[str, Any]:
         principal = permission.get("grantedToV2") or permission.get("grantedTo") or {}
         principal_type = next(
-            (kind for kind in ("user", "group", "siteUser", "siteGroup", "application") if kind in principal),
+            (
+                kind
+                for kind in ("user", "group", "siteUser", "siteGroup", "application")
+                if kind in principal
+            ),
             None,
         )
         link = permission.get("link") or {}
@@ -905,8 +921,12 @@ class SharepointManager(SharepointManagerBase):
             "type": link.get("type"),
             "granted_to": {
                 "type": principal_type,
-                "id": principal.get(principal_type, {}).get("id") if principal_type else None,
-                "display_name": principal.get(principal_type, {}).get("displayName") if principal_type else None,
+                "id": principal.get(principal_type, {}).get("id")
+                if principal_type
+                else None,
+                "display_name": principal.get(principal_type, {}).get("displayName")
+                if principal_type
+                else None,
             },
             "expiration_datetime": permission.get("expirationDateTime"),
         }
@@ -1003,7 +1023,9 @@ class SharepointManager(SharepointManagerBase):
             with open(local_file_path, "rb") as f:
                 start = 0
                 if file_size == 0:
-                    content_url = session_url.removesuffix("/createUploadSession") + "/content"
+                    content_url = (
+                        session_url.removesuffix("/createUploadSession") + "/content"
+                    )
                     resp = self._request(
                         "PUT", content_url, headers=self._hdr(), data=b"", timeout=60
                     )
@@ -1033,7 +1055,9 @@ class SharepointManager(SharepointManagerBase):
                     except (AttributeError, TypeError, ValueError):
                         pass
                     if next_start < 0 or next_start > file_size:
-                        raise SPValidationError("Graph returned an invalid upload offset")
+                        raise SPValidationError(
+                            "Graph returned an invalid upload offset"
+                        )
                     if next_start != end + 1:
                         f.seek(next_start)
                     start = next_start
@@ -1383,7 +1407,9 @@ class SharepointManager(SharepointManagerBase):
             raise SPValidationError("Downloaded content was incomplete")
         expected_hash = file_obj.quick_xor_hash
         if expected_hash and digest.b64digest() != expected_hash:
-            raise SPFileIntegrityError("Downloaded content failed integrity verification")
+            raise SPFileIntegrityError(
+                "Downloaded content failed integrity verification"
+            )
         return downloaded_bytes
 
     def _download_to_path(self, file_obj: SPFile, target_path: str) -> None:
@@ -1727,7 +1753,9 @@ class SharepointManager(SharepointManagerBase):
                 f"{self._graph_base_url}/sites/{site_id}/drives/{drive_id}"
                 f"/items/{folder_id}:/{encoded_name}:/createUploadSession"
             )
-            request_body = {"item": {"@microsoft.graph.conflictBehavior": conflict_behavior}}
+            request_body = {
+                "item": {"@microsoft.graph.conflictBehavior": conflict_behavior}
+            }
             r = self._request(
                 "POST",
                 url,
@@ -1780,7 +1808,9 @@ class SharepointManager(SharepointManagerBase):
                     except (AttributeError, TypeError, ValueError):
                         pass
                     if next_start < 0 or next_start > file_size_b:
-                        raise SPValidationError("Graph returned an invalid upload offset")
+                        raise SPValidationError(
+                            "Graph returned an invalid upload offset"
+                        )
                     if next_start != start_byte + len(chunk):
                         file.seek(next_start)
                     start_byte = next_start
@@ -1866,7 +1896,9 @@ class SharepointManager(SharepointManagerBase):
         local_folder_path = os.path.abspath(local_folder_path)
         depth = _depth or len(get_names_to_folder(sp_relative_folder_path or ""))
         if depth > self.policy.max_depth:
-            raise SPValidationError("Folder depth exceeds the configured traversal budget")
+            raise SPValidationError(
+                "Folder depth exceeds the configured traversal budget"
+            )
         if os.path.islink(local_folder_path):
             raise SPValidationError("Symlink upload roots are not allowed")
         if not os.path.exists(local_folder_path):
@@ -2003,7 +2035,9 @@ class SharepointManager(SharepointManagerBase):
         local_download_path = os.path.abspath(local_download_path)
         depth = _depth or len(get_names_to_folder(sp_relative_folder_path or ""))
         if depth > self.policy.max_depth:
-            raise SPValidationError("Folder depth exceeds the configured traversal budget")
+            raise SPValidationError(
+                "Folder depth exceeds the configured traversal budget"
+            )
 
         # Create local folder
         cur_folder = _folder or (

@@ -9,10 +9,10 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.core import SharepointManager  # noqa: E402
-from sharepoint_manager.dataclasses import SPFile  # noqa: E402
-from sharepoint_manager.exceptions import SPFileIntegrityError  # noqa: E402
-from sharepoint_manager.utils import QuickXorHash  # noqa: E402
+from sharepoint_manager.core import SharepointManager
+from sharepoint_manager.dataclasses import SPFile
+from sharepoint_manager.exceptions import SPFileIntegrityError
+from sharepoint_manager.utils import QuickXorHash
 
 
 class Response:

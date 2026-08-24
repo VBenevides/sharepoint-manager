@@ -8,9 +8,10 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-import requests  # noqa: E402
-from sharepoint_manager.core import SharepointManager  # noqa: E402
-from sharepoint_manager.exceptions import (  # noqa: E402
+import requests
+
+from sharepoint_manager.core import SharepointManager
+from sharepoint_manager.exceptions import (
     SPGraphError,
     SPThrottledError,
     SPValidationError,

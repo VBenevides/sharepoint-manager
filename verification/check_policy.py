@@ -8,7 +8,7 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.dataclasses import OperationPolicy  # noqa: E402
+from sharepoint_manager.dataclasses import OperationPolicy
 
 
 def main() -> None:
