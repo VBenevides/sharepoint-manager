@@ -1209,10 +1209,12 @@ class SharepointManager(SharepointManagerBase):
         >>> files = manager.list_files(sp_relative_folder_path = "Folder1/Folder2/Folder3") # Changes self.folder and lists the files
         """
 
-        if sp_relative_folder_path is not None:
-            self.folder = self.set_folder(sp_relative_folder_path)
-
-        files, _ = self._list_children()
+        target = (
+            self._resolve_folder(sp_relative_folder_path)
+            if sp_relative_folder_path is not None
+            else self.folder
+        )
+        files, _ = self._list_children(target)
         return files
 
     def list_folders(
@@ -1239,10 +1241,12 @@ class SharepointManager(SharepointManagerBase):
         >>> folders = manager.list_folders(sp_relative_folder_path = "Folder1/Folder2/Folder3") # Changes self.folder and lists the folders
         """
 
-        if sp_relative_folder_path is not None:
-            _ = self.set_folder(sp_relative_folder_path)
-
-        _, folders = self._list_children()
+        target = (
+            self._resolve_folder(sp_relative_folder_path)
+            if sp_relative_folder_path is not None
+            else self.folder
+        )
+        _, folders = self._list_children(target)
         return folders
 
     # ----------------------------------------------------------
@@ -1250,7 +1254,10 @@ class SharepointManager(SharepointManagerBase):
     # ----------------------------------------------------------
 
     def upload_file(
-        self, local_file_path: str, sp_relative_folder_path: str | None = None
+        self,
+        local_file_path: str,
+        sp_relative_folder_path: str | None = None,
+        _folder: SPFolder | None = None,
     ) -> None:
         """
         Upload a local file to SharePoint.
@@ -1285,8 +1292,11 @@ class SharepointManager(SharepointManagerBase):
                 f"Path does not correspond to a file: {local_file_path}"
             )
 
-        if sp_relative_folder_path is not None:
-            _ = self.set_folder(sp_relative_folder_path, create_folder=True)
+        target_folder = _folder or (
+            self._resolve_folder(sp_relative_folder_path, create_folder=True)
+            if sp_relative_folder_path is not None
+            else self.folder
+        )
 
         file_name = get_filename(local_file_path)
         file_size_b = os.path.getsize(local_file_path)
@@ -1298,7 +1308,7 @@ class SharepointManager(SharepointManagerBase):
         with open(local_file_path, "rb") as file:
             site_id = self._site_id
             drive_id = self._drive_id
-            folder_id = self.folder.id
+            folder_id = target_folder.id
             encoded_name = quote_segment(file_name)
             url = (
                 f"{self._graph_base_url}/sites/{site_id}/drives/{drive_id}"
@@ -1365,7 +1375,11 @@ class SharepointManager(SharepointManagerBase):
         logger.info("Upload completed.")
 
     def upload_folder(
-        self, local_folder_path: str, sp_relative_folder_path: str | None = None
+        self,
+        local_folder_path: str,
+        sp_relative_folder_path: str | None = None,
+        _folder: SPFolder | None = None,
+        _depth: int = 0,
     ) -> None:
         """
         Recursively upload a local folder and its contents to SharePoint.
@@ -1393,7 +1407,9 @@ class SharepointManager(SharepointManagerBase):
         """
 
         local_folder_path = os.path.abspath(local_folder_path)
-        self._check_depth(sp_relative_folder_path)
+        depth = _depth or len(get_names_to_folder(sp_relative_folder_path or ""))
+        if depth > self.policy.max_depth:
+            raise SPValidationError("Folder depth exceeds the configured traversal budget")
         if os.path.islink(local_folder_path):
             raise SPValidationError("Symlink upload roots are not allowed")
         if not os.path.exists(local_folder_path):
@@ -1403,14 +1419,12 @@ class SharepointManager(SharepointManagerBase):
                 f"Path does not correspond to a folder: {local_folder_path}"
             )
 
-        # Resolve the destination folder (creating it if needed) without
-        # leaking ``self.folder`` mutation to the caller. ``cwd`` restores the
-        # previous folder on exit – even on exception.
-        if sp_relative_folder_path is not None:
-            with self.cwd(sp_relative_folder_path, create_folder=True):
-                base_relative = self.folder.relative_url
-        else:
-            base_relative = self.folder.relative_url
+        base_folder = _folder or (
+            self._resolve_folder(sp_relative_folder_path, create_folder=True)
+            if sp_relative_folder_path is not None
+            else self.folder
+        )
+        base_relative = base_folder.relative_url
 
         new_folder_name = os.path.basename(local_folder_path)
         sp_folder_path = f"{base_relative}/{new_folder_name}".lstrip("/")
@@ -1427,14 +1441,12 @@ class SharepointManager(SharepointManagerBase):
                 elif entry.is_dir(follow_symlinks=False):
                     subdirs.append(entry.path)
 
-        # Switch into the destination folder for this level only; siblings
-        # at the next level recurse via their own ``cwd`` blocks.
-        with self.cwd(sp_folder_path, create_folder=True):
-            for file_path in files:
-                self.upload_file(file_path)
+        target_folder = self._resolve_folder(sp_folder_path, create_folder=True)
+        for file_path in files:
+            self.upload_file(file_path, _folder=target_folder)
 
-            for subdir_path in subdirs:
-                self.upload_folder(subdir_path, sp_folder_path)
+        for subdir_path in subdirs:
+            self.upload_folder(subdir_path, _folder=target_folder, _depth=depth + 1)
 
     # ----------------------------------------------------------
     # Download files/folders from Sharepoint
@@ -1446,6 +1458,7 @@ class SharepointManager(SharepointManagerBase):
         local_download_path: str,
         sp_relative_folder_path: str | None = None,
         new_filename: str | None = None,
+        _folder: SPFolder | None = None,
     ) -> SPFile:
         """
         Download a file from SharePoint.
@@ -1481,10 +1494,12 @@ class SharepointManager(SharepointManagerBase):
         os.makedirs(local_download_path, exist_ok=True)
 
         if isinstance(file, str):
-            if sp_relative_folder_path is not None:
-                _ = self.set_folder(sp_relative_folder_path)
-
-            file_obj = self._get_file(file)
+            target_folder = _folder or (
+                self._resolve_folder(sp_relative_folder_path)
+                if sp_relative_folder_path is not None
+                else self.folder
+            )
+            file_obj = self._get_file(file, target_folder)
         else:
             file_obj = file
 
@@ -1528,6 +1543,8 @@ class SharepointManager(SharepointManagerBase):
         self,
         local_download_path: str,
         sp_relative_folder_path: str | None = None,
+        _folder: SPFolder | None = None,
+        _depth: int = 0,
     ) -> None:
         """
         Recursively download a SharePoint folder and its contents.
@@ -1553,13 +1570,16 @@ class SharepointManager(SharepointManagerBase):
         """
 
         local_download_path = os.path.abspath(local_download_path)
-        self._check_depth(sp_relative_folder_path)
-
-        if sp_relative_folder_path is not None:
-            _ = self.set_folder(sp_relative_folder_path)
+        depth = _depth or len(get_names_to_folder(sp_relative_folder_path or ""))
+        if depth > self.policy.max_depth:
+            raise SPValidationError("Folder depth exceeds the configured traversal budget")
 
         # Create local folder
-        cur_folder = self.folder
+        cur_folder = _folder or (
+            self._resolve_folder(sp_relative_folder_path)
+            if sp_relative_folder_path is not None
+            else self.folder
+        )
         logger.info("Downloading folder")
         cur_folder_download_path = (
             safe_join(local_download_path, cur_folder.name)
@@ -1575,15 +1595,11 @@ class SharepointManager(SharepointManagerBase):
             _ = self.download_file(file, cur_folder_download_path)
 
         # Recurse using the resolved subfolder paths.
-        cur_relative = cur_folder.relative_url
-        for folder_name in subfolders:
-            folder_srp = (
-                f"{cur_relative}/{folder_name}" if cur_relative else folder_name
-            )
-            folder_srp = folder_srp.removeprefix("/")
+        for subfolder in subfolders.values():
             self.download_folder(
                 cur_folder_download_path,
-                folder_srp,
+                _folder=subfolder,
+                _depth=depth + 1,
             )
 
     def delete_file(
@@ -1618,11 +1634,13 @@ class SharepointManager(SharepointManagerBase):
         >>> manager.delete_file(filename = "file.txt", sp_relative_folder_path = "Folder1/Folder2/Folder3")
         """
 
-        if sp_relative_folder_path is not None:
-            _ = self.set_folder(sp_relative_folder_path)
-
         if isinstance(file, str):
-            file = self._get_file(file)
+            target_folder = (
+                self._resolve_folder(sp_relative_folder_path)
+                if sp_relative_folder_path is not None
+                else self.folder
+            )
+            file = self._get_file(file, target_folder)
         else:
             self._validate_file_boundary(file)
 
@@ -1687,8 +1705,7 @@ class SharepointManager(SharepointManagerBase):
                 if sp_relative_folder_path
                 else folder
             )
-            with self.cwd(scope_path):
-                target = self.folder
+            target = self._resolve_folder(scope_path)
         else:
             target = folder
             self._validate_object_boundary(target)
