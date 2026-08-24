@@ -961,6 +961,16 @@ class SharepointManager(SharepointManagerBase):
     # Basic file system functions
     # ---------------------------------------------------------
 
+    def validate_resource_scope(
+        self, site_id: str | None = None, drive_id: str | None = None
+    ) -> bool:
+        """Validate that an optional deployment grant matches this manager."""
+        if site_id is not None and site_id != self._site_id:
+            raise SPUnauthorizedTarget("Configured site does not match the selected resource grant")
+        if drive_id is not None and drive_id != self._drive_id:
+            raise SPUnauthorizedTarget("Configured drive does not match the selected resource grant")
+        return True
+
     def get_file_author(self, file: SPFile) -> dict[str, dict[str, str]]:
         """
         Return author and editor metadata for a SharePoint file.
