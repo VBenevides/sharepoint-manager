@@ -20,3 +20,12 @@ class SPDriveNotFound(SPValidationError):
 
 class SPUnauthorizedTarget(SPValidationError):
     """A resolved resource is outside the manager's configured boundary."""
+
+
+class SPAmbiguousWriteError(RuntimeError):
+    """A write may have reached Graph but its final outcome is unknown."""
+
+    def __init__(self, upload_url: str, cause: Exception | None = None) -> None:
+        super().__init__("Upload outcome is ambiguous")
+        self.upload_url = upload_url
+        self.cause = cause

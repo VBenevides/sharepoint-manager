@@ -35,6 +35,7 @@ from .dataclasses import (
 )
 from .exceptions import (
     SPDriveNotFound,
+    SPAmbiguousWriteError,
     SPFileNotFound,
     SPFolderNotEmpty,
     SPFolderNotFound,
@@ -676,17 +677,25 @@ class SharepointManager(SharepointManagerBase):
 
         return file_obj
 
-    def upload_file_to_url(self, sharing_url: str, local_file_path: str) -> SPFile:
+    def upload_file_to_url(
+        self,
+        sharing_url: str,
+        local_file_path: str,
+        conflict_behavior: Literal["fail", "replace", "rename"] = "replace",
+    ) -> SPFile:
         """
         Uploads a file to SharePoint using an Upload Session.
         Works for any file size by breaking the file into 320KiB-aligned chunks.
         """
+        if conflict_behavior not in {"fail", "replace", "rename"}:
+            raise SPValidationError("Invalid conflict behavior")
         # 1. Resolve the sharing URL to get Drive and Parent IDs
         file_obj = self.get_file_metadata_from_url(sharing_url)
         drive_id = file_obj.parent_reference["driveId"]
         item_id = file_obj.id
 
         file_size = os.path.getsize(local_file_path)
+        self._check_file_budget(file_size)
 
         # 2. Create the Upload Session
         session_url = (
@@ -695,7 +704,7 @@ class SharepointManager(SharepointManagerBase):
         )
 
         # Optional: Conflict behavior (fail, replace, or rename)
-        body = {"item": {"@microsoft.graph.conflictBehavior": "replace"}}
+        body = {"item": {"@microsoft.graph.conflictBehavior": conflict_behavior}}
 
         r = self._request(
             "POST", session_url, headers=self._hdr(json_content=True), json=body
@@ -712,6 +721,12 @@ class SharepointManager(SharepointManagerBase):
         try:
             with open(local_file_path, "rb") as f:
                 start = 0
+                if file_size == 0:
+                    content_url = session_url.removesuffix("/createUploadSession") + "/content"
+                    resp = self._request(
+                        "PUT", content_url, headers=self._hdr(), data=b"", timeout=60
+                    )
+                    resp.raise_for_status()
                 while start < file_size:
                     chunk = f.read(chunk_size)
                     curr_chunk_len = len(chunk)
@@ -729,7 +744,18 @@ class SharepointManager(SharepointManagerBase):
                     if resp.status_code not in (200, 201, 202):
                         resp.raise_for_status()
 
-                    start = end + 1
+                    next_start = end + 1
+                    try:
+                        ranges = resp.json().get("nextExpectedRanges", [])
+                        if ranges:
+                            next_start = int(str(ranges[0]).split("-", 1)[0])
+                    except (AttributeError, TypeError, ValueError):
+                        pass
+                    if next_start < 0 or next_start > file_size:
+                        raise SPValidationError("Graph returned an invalid upload offset")
+                    if next_start != end + 1:
+                        f.seek(next_start)
+                    start = next_start
                     now = time.monotonic()
                     if (
                         now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
@@ -737,7 +763,7 @@ class SharepointManager(SharepointManagerBase):
                     ):
                         logger.info("Uploaded %s/%s bytes...", start, file_size)
                         last_log = now
-        except Exception:
+        except Exception as exc:
             # Best-effort cancel of the upload session if anything goes wrong.
             try:
                 self._request("DELETE", upload_url, timeout=30)
@@ -747,8 +773,11 @@ class SharepointManager(SharepointManagerBase):
 
         logger.info("Upload complete.")
         if resp is None:
-            raise RuntimeError("Upload session produced no response (empty file?)")
-        return SPFile.from_dict(resp.json())
+            raise SPAmbiguousWriteError(upload_url)
+        try:
+            return SPFile.from_dict(resp.json())
+        except (TypeError, KeyError, ValueError):
+            return file_obj
 
     def _consume_delta(
         self, start_url: str
@@ -1258,7 +1287,8 @@ class SharepointManager(SharepointManagerBase):
         local_file_path: str,
         sp_relative_folder_path: str | None = None,
         _folder: SPFolder | None = None,
-    ) -> None:
+        conflict_behavior: Literal["fail", "replace", "rename"] = "replace",
+    ) -> SPFile:
         """
         Upload a local file to SharePoint.
 
@@ -1282,6 +1312,8 @@ class SharepointManager(SharepointManagerBase):
         >>> manager.upload_file(local_file_path = "file.txt", sp_relative_folder_path = "Folder1/Folder2/Folder3")
         """
 
+        if conflict_behavior not in {"fail", "replace", "rename"}:
+            raise SPValidationError("Invalid conflict behavior")
         local_file_path = os.path.abspath(local_file_path)
         if os.path.islink(local_file_path):
             raise SPValidationError("Symlink upload roots are not allowed")
@@ -1314,7 +1346,7 @@ class SharepointManager(SharepointManagerBase):
                 f"{self._graph_base_url}/sites/{site_id}/drives/{drive_id}"
                 f"/items/{folder_id}:/{encoded_name}:/createUploadSession"
             )
-            request_body = {"@microsoft.graph.conflictBehavior": "replace"}
+            request_body = {"item": {"@microsoft.graph.conflictBehavior": conflict_behavior}}
             r = self._request(
                 "POST",
                 url,
@@ -1329,7 +1361,14 @@ class SharepointManager(SharepointManagerBase):
             chunk_size = _UPLOAD_CHUNK_SIZE
             start_byte = 0
             last_log = 0.0
+            response: requests.Response | None = None
             try:
+                if file_size_b == 0:
+                    content_url = url.removesuffix("/createUploadSession") + "/content"
+                    response = self._request(
+                        "PUT", content_url, headers=self._hdr(), data=b"", timeout=60
+                    )
+                    response.raise_for_status()
                 while True:
                     chunk = file.read(chunk_size)
                     if not chunk:
@@ -1352,7 +1391,18 @@ class SharepointManager(SharepointManagerBase):
                     )
                     response.raise_for_status()
 
-                    start_byte += len(chunk)
+                    next_start = start_byte + len(chunk)
+                    try:
+                        ranges = response.json().get("nextExpectedRanges", [])
+                        if ranges:
+                            next_start = int(str(ranges[0]).split("-", 1)[0])
+                    except (AttributeError, TypeError, ValueError):
+                        pass
+                    if next_start < 0 or next_start > file_size_b:
+                        raise SPValidationError("Graph returned an invalid upload offset")
+                    if next_start != start_byte + len(chunk):
+                        file.seek(next_start)
+                    start_byte = next_start
                     now = time.monotonic()
                     if (
                         now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
@@ -1364,15 +1414,21 @@ class SharepointManager(SharepointManagerBase):
                             file_size_b / (1024 * 1024),
                         )
                         last_log = now
-            except Exception:
+            except Exception as exc:
                 # Cancel upload session on failure to free server-side state.
                 try:
                     _ = self._request("DELETE", upload_url, timeout=30)
                 except Exception:
                     pass
-                raise
+                raise SPAmbiguousWriteError(upload_url, exc) from exc
 
         logger.info("Upload completed.")
+        if response is None:
+            raise SPAmbiguousWriteError(upload_url)
+        try:
+            return SPFile.from_dict(response.json())
+        except (TypeError, KeyError, ValueError):
+            return self._get_file(file_name, target_folder)
 
     def upload_folder(
         self,

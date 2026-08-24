@@ -11,7 +11,12 @@ from .dataclasses import (
     TokenProvider,
     UserDelegatedCredential,
 )
-from .exceptions import SPFileNotFound, SPFolderNotEmpty, SPFolderNotFound
+from .exceptions import (
+    SPAmbiguousWriteError,
+    SPFileNotFound,
+    SPFolderNotEmpty,
+    SPFolderNotFound,
+)
 from .utils import QuickXorHash
 
 __all__ = [
@@ -21,6 +26,7 @@ __all__ = [
     "SPDeletedItem",
     "SPFile",
     "SPFileNotFound",
+    "SPAmbiguousWriteError",
     "SPFolder",
     "SPFolderNotEmpty",
     "SPFolderNotFound",
