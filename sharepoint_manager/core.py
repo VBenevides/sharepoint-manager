@@ -988,7 +988,7 @@ class SharepointManager(SharepointManagerBase):
                     ):
                         logger.info("Uploaded %s/%s bytes...", start, file_size)
                         last_log = now
-        except Exception as exc:
+        except Exception:
             # Best-effort cancel of the upload session if anything goes wrong.
             try:
                 self._request("DELETE", upload_url, timeout=30)

@@ -9,7 +9,11 @@ msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
 from sharepoint_manager.core import SharepointManager
-from sharepoint_manager.exceptions import SPFolderNotEmpty, SPUnauthorizedTarget, SPValidationError
+from sharepoint_manager.exceptions import (
+    SPFolderNotEmpty,
+    SPUnauthorizedTarget,
+    SPValidationError,
+)
 
 
 class Response:
@@ -32,9 +36,13 @@ def main() -> None:
     manager._graph_base_url = "https://graph.microsoft.com/v1.0"
     manager._site_id = "site-a"
     manager._drive_id = "drive-a"
-    manager.policy = types.SimpleNamespace(max_pages=3, max_items=10, wall_clock_seconds=60)
+    manager.policy = types.SimpleNamespace(
+        max_pages=3, max_items=10, wall_clock_seconds=60
+    )
     manager._hdr = lambda json_content=False: {"Authorization": "Bearer token"}
-    share_url = "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Folder%20%231"
+    share_url = (
+        "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Folder%20%231"
+    )
     folder = {
         "id": "folder-a",
         "name": "Folder #1",
@@ -73,7 +81,9 @@ def main() -> None:
                         {
                             "id": "permission-a",
                             "roles": ["read"],
-                            "grantedToV2": {"user": {"id": "user-a", "displayName": "A User"}},
+                            "grantedToV2": {
+                                "user": {"id": "user-a", "displayName": "A User"}
+                            },
                         }
                     ]
                 }

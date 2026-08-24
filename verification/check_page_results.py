@@ -39,7 +39,7 @@ def main() -> None:
         first: Response({"value": [{"id": "one"}], "@odata.nextLink": second}),
         second: Response({"value": [{"id": "two"}]}),
     }
-    manager._request = lambda method, url, **kwargs: (requested.append(url) or pages[url])
+    manager._request = lambda method, url, **kwargs: requested.append(url) or pages[url]
     iterator = manager.iter_collection(first)
     first_page = next(iterator)
     assert requested == [first]

@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Python ${{ matrix.python }} / ${{ matrix.dependencies }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        dependencies: [minimum, latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ "${{ matrix.dependencies }}" = minimum ]; then
+            python -m pip install "msal==1.28.0" "requests==2.31.0"
+          else
+            python -m pip install "msal>=1.28,<2" "requests>=2.31,<3"
+          fi
+          python -m pip install ruff==0.12.10 pyright==1.1.390
+      - name: Compile and run focused checks
+        run: |
+          python -m compileall -q sharepoint_manager verification
+          python verification/run_core_checks.py
+      - name: Format and lint
+        run: |
+          ruff format --check verification sharepoint_manager/__init__.py sharepoint_manager/dataclasses.py sharepoint_manager/exceptions.py sharepoint_manager/utils.py
+          ruff check --select E4,E7,E9,F --ignore E402 sharepoint_manager verification
+      - name: Type check
+        run: pyright sharepoint_manager
+      - name: Dependency consistency
+        run: python -m pip check
+
+  artifacts:
+    name: Build and inspect artifacts
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install build and audit tools
+        run: |
+          python -m pip install -r requirements-build.txt
+          python -m pip install pip-audit==2.9.0 pip-licenses==5.0.0 cyclonedx-bom==7.1.0 twine==6.1.0
+      - name: Build
+        run: python -m build --sdist --wheel
+      - name: Install and inspect wheel
+        run: |
+          python -m pip install dist/*.whl
+          python -m pip check
+          python -c "import sharepoint_manager; print(sharepoint_manager.__version__)"
+          twine check --strict dist/*
+      - name: Dependency audit, license policy, and SBOM
+        run: |
+          pip-audit
+          pip-licenses --fail-on="GPL;LGPL;AGPL"
+          cyclonedx-py environment --output-format json --output-file sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-audit
+          path: |
+            dist/*
+            sbom.json
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2

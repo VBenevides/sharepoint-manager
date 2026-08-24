@@ -17,3 +17,11 @@ version = {file = "VERSION"}
 
 [tool.setuptools.packages.find]
 include = ["sharepoint_manager*"]
+
+[tool.pyright]
+include = ["sharepoint_manager"]
+typeCheckingMode = "basic"
+reportMissingImports = "none"
+reportAttributeAccessIssue = "none"
+reportArgumentType = "none"
+reportOptionalMemberAccess = "none"

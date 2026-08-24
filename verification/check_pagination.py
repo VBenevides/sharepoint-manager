@@ -59,7 +59,9 @@ def main() -> None:
     else:
         raise AssertionError("repeated pagination link accepted")
 
-    obj = manager({first: Response({"value": [], "@odata.nextLink": "https://evil.example"})})
+    obj = manager(
+        {first: Response({"value": [], "@odata.nextLink": "https://evil.example"})}
+    )
     try:
         list(obj._paginate(first))
     except SPValidationError:
