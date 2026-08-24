@@ -875,21 +875,14 @@ class SharepointManager(SharepointManagerBase):
 
     def _get_drive_id(self) -> str:
         site_id = self._site_id
-        r = self._request(
-            "GET",
-            f"{self._graph_base_url}/sites/{site_id}/drives",
-            headers=self._hdr(),
-            timeout=30,
-        )
-        r.raise_for_status()
         if self.document_folder_name is not None:
-            for d in r.json().get("value", []):
+            for d in self._paginate(f"{self._graph_base_url}/sites/{site_id}/drives"):
                 if d.get("name") == self.document_folder_name:
                     self._drive_id = d["id"]
                     return self._drive_id
+            raise SPDriveNotFound("Requested document library was not found")
 
-        # Auto-detect the default document library when no name was provided
-        # or when no drive matched the supplied name.
+        # Auto-detect the default document library only when no name was provided.
         r = self._request(
             "GET",
             f"{self._graph_base_url}/sites/{site_id}/drive",
