@@ -18,7 +18,7 @@ import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
-from typing import Any, BinaryIO, Literal
+from typing import Any, BinaryIO, Callable, Literal
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -127,6 +127,17 @@ class SharepointManagerBase:
             lock = threading.Lock()
             setattr(self, "_request_lock", lock)
         return lock
+
+    def _emit_telemetry(self, event: str, **fields: Any) -> None:
+        callback = getattr(self, "telemetry", None)
+        if not callable(callback):
+            return
+        record = {"event": event, **fields}
+        try:
+            # ponytail: telemetry is best-effort; callback health must not affect transfers.
+            callback(record)
+        except Exception:
+            logger.debug("Telemetry callback failed", exc_info=True)
 
     # ----------------------------------------------------------
     # Support Methods
@@ -307,6 +318,7 @@ class SharepointManagerBase:
             # Cache the token and its expiry
             self._cached_token = token
             self._cached_token_expiry = int(expires_on)
+            self._emit_telemetry("auth.token_refresh", success=True)
 
             return token
 
@@ -350,6 +362,7 @@ class SharepointManagerBase:
         max_attempts = min(max_attempts, policy.max_retry_attempts) if retryable else 1
         deadline = time.monotonic() + policy.wall_clock_seconds
         while True:
+            request_started = time.monotonic()
             try:
                 # ponytail: one request lock; add per-session pooling only if measured throughput needs it.
                 with self._get_request_lock():
@@ -364,7 +377,15 @@ class SharepointManagerBase:
                         stream=stream,
                         allow_redirects=allow_redirects,
                     )
-            except requests.RequestException:
+            except requests.RequestException as exc:
+                self._emit_telemetry(
+                    "graph.request",
+                    method=method,
+                    attempt=attempt,
+                    elapsed_ms=round((time.monotonic() - request_started) * 1000, 1),
+                    failure_class=type(exc).__name__,
+                    retryable=retryable,
+                )
                 if (
                     not retryable
                     or attempt >= max_attempts
@@ -386,6 +407,16 @@ class SharepointManagerBase:
                     resp.status_code,
                     request_id,
                 )
+            self._emit_telemetry(
+                "graph.request",
+                method=method,
+                attempt=attempt,
+                status=resp.status_code,
+                request_id=request_id,
+                elapsed_ms=round((time.monotonic() - request_started) * 1000, 1),
+                throttled=resp.status_code == 429,
+                retrying=resp.status_code in _RETRY_STATUSES and attempt < max_attempts,
+            )
             # Handle throttling / transient 5xx with Retry-After.
             if resp.status_code in _RETRY_STATUSES and attempt < max_attempts:
                 retry_after = resp.headers.get("Retry-After")
@@ -470,6 +501,14 @@ class SharepointManagerBase:
             finally:
                 r.close()
             page_count += 1
+            page_items = len(data.get("value", []))
+            self._emit_telemetry(
+                "graph.page",
+                operation="collection",
+                page=page_count,
+                items=page_items,
+                total_items=item_count + page_items,
+            )
             for item in data.get("value", []):
                 item_count += 1
                 if item_count > policy.max_items:
@@ -507,6 +546,13 @@ class SharepointManagerBase:
             if item_count > policy.max_items:
                 raise SPValidationError("Graph item budget exceeded")
             page_count += 1
+            self._emit_telemetry(
+                "graph.page",
+                operation="collection",
+                page=page_count,
+                items=len(values),
+                total_items=item_count,
+            )
             next_url = payload.get("@odata.nextLink")
             yield SPCollectionPage(values, next_url)
 
@@ -559,6 +605,14 @@ class SharepointManagerBase:
             if checkpoint is not None:
                 self._validate_graph_url(checkpoint)
             page_count += 1
+            self._emit_telemetry(
+                "graph.page",
+                operation="delta",
+                page=page_count,
+                items=len(files) + len(folders) + len(deleted),
+                total_items=item_count,
+                has_checkpoint=checkpoint is not None,
+            )
             next_url = next_page
             yield SPDeltaPage(tuple(files), tuple(folders), tuple(deleted), next_page, checkpoint)
 
@@ -600,6 +654,7 @@ class SharepointManager(SharepointManagerBase):
         token_provider: TokenProvider | None = None,
         policy: OperationPolicy | None = None,
         session: requests.Session | None = None,
+        telemetry: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """
         Initializes the SharepointManager with a given SharePoint URL and credentials.
@@ -646,6 +701,7 @@ class SharepointManager(SharepointManagerBase):
         self._close_lock = threading.Lock()
         self.credentials = credentials
         self._token_provider = token_provider
+        self.telemetry = telemetry
 
         self.url: str = sharepoint_site_url
         if "/teams/" in parsed_site_url.path:
@@ -1055,6 +1111,14 @@ class SharepointManager(SharepointManagerBase):
                 self._validate_graph_url(latest_delta_link)
             next_url = payload.get("@odata.nextLink")
             page_count += 1
+            self._emit_telemetry(
+                "graph.page",
+                operation="delta",
+                page=page_count,
+                items=len(payload.get("value", [])),
+                total_items=item_count,
+                has_checkpoint=latest_delta_link is not None,
+            )
 
         if latest_delta_link is None and page_count > 0:
             logger.warning(
@@ -1303,7 +1367,7 @@ class SharepointManager(SharepointManagerBase):
                 "Folder depth exceeds the configured traversal budget"
             )
 
-    def _stream_download(self, file_obj: SPFile, output: BinaryIO) -> None:
+    def _stream_download(self, file_obj: SPFile, output: BinaryIO) -> int:
         downloaded_bytes = 0
         digest = QuickXorHash()
         with self._request(
@@ -1320,16 +1384,35 @@ class SharepointManager(SharepointManagerBase):
         expected_hash = file_obj.quick_xor_hash
         if expected_hash and digest.b64digest() != expected_hash:
             raise SPFileIntegrityError("Downloaded content failed integrity verification")
+        return downloaded_bytes
 
     def _download_to_path(self, file_obj: SPFile, target_path: str) -> None:
         """Stream to a sibling temporary file and atomically replace the target."""
         directory = os.path.dirname(target_path) or "."
         fd, temporary_path = tempfile.mkstemp(prefix=".sp-download-", dir=directory)
+        downloaded_bytes = 0
         try:
             with os.fdopen(fd, "wb") as output:
-                self._stream_download(file_obj, output)
+                downloaded_bytes = self._stream_download(file_obj, output)
             os.replace(temporary_path, target_path)
-        except Exception:
+            self._emit_telemetry(
+                "transfer",
+                operation="download",
+                bytes=downloaded_bytes,
+                items=1,
+                outcome="success",
+                partial=False,
+            )
+        except Exception as exc:
+            self._emit_telemetry(
+                "transfer",
+                operation="download",
+                bytes=downloaded_bytes,
+                items=1,
+                outcome="failure",
+                partial=downloaded_bytes > 0,
+                failure_class=type(exc).__name__,
+            )
             try:
                 os.unlink(temporary_path)
             except FileNotFoundError:
@@ -1356,7 +1439,15 @@ class SharepointManager(SharepointManagerBase):
             file_obj = file
             self._validate_file_boundary(file_obj)
         self._check_file_budget(int(file_obj.size))
-        self._stream_download(file_obj, destination)
+        downloaded_bytes = self._stream_download(file_obj, destination)
+        self._emit_telemetry(
+            "transfer",
+            operation="download",
+            bytes=downloaded_bytes,
+            items=1,
+            outcome="success",
+            partial=False,
+        )
         return file_obj
 
     def upload_fileobj(
@@ -1710,15 +1801,35 @@ class SharepointManager(SharepointManagerBase):
                     _ = self._request("DELETE", upload_url, timeout=30)
                 except Exception:
                     pass
+                self._emit_telemetry(
+                    "transfer",
+                    operation="upload",
+                    bytes=start_byte,
+                    expected_bytes=file_size_b,
+                    items=1,
+                    outcome="failure",
+                    partial=start_byte > 0,
+                    failure_class=type(exc).__name__,
+                )
                 raise SPAmbiguousWriteError(upload_url, exc) from exc
 
         logger.info("Upload completed.")
         if response is None:
             raise SPAmbiguousWriteError(upload_url)
         try:
-            return SPFile.from_dict(response.json())
+            result = SPFile.from_dict(response.json())
         except (TypeError, KeyError, ValueError):
-            return self._get_file(file_name, target_folder)
+            result = self._get_file(file_name, target_folder)
+        self._emit_telemetry(
+            "transfer",
+            operation="upload",
+            bytes=file_size_b,
+            expected_bytes=file_size_b,
+            items=1,
+            outcome="success",
+            partial=False,
+        )
+        return result
 
     def upload_folder(
         self,

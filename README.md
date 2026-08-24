@@ -87,6 +87,9 @@ Managers reuse one session and token provider and close owned resources through
 use separate managers when independent connection concurrency is required.
 Normal logs contain no bearer tokens, credentials, capability URLs, filenames,
 or permission members. Graph request IDs are retained as diagnostic fields.
+Pass `telemetry=callback` to receive privacy-safe `graph.request`, `graph.page`,
+`transfer`, and `auth.token_refresh` records with latency, status, retry,
+bytes, page/item, throttle, failure-class, and partial-outcome fields.
 
 ## Development, migration, and support
 
