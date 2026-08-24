@@ -19,9 +19,18 @@ from .dataclasses import (
 )
 from .exceptions import (
     SPAmbiguousWriteError,
+    SPAuthenticationError,
+    SPAuthorizationError,
+    SPConflictError,
+    SPDeadlineExceeded,
+    SPDriveNotFound,
     SPFileNotFound,
+    SPFileIntegrityError,
     SPFolderNotEmpty,
     SPFolderNotFound,
+    SPGraphError,
+    SPThrottledError,
+    SPValidationError,
 )
 from .utils import QuickXorHash
 
@@ -33,10 +42,19 @@ __all__ = [
     "SPFile",
     "SPFileNotFound",
     "SPAmbiguousWriteError",
+    "SPAuthenticationError",
+    "SPAuthorizationError",
+    "SPConflictError",
+    "SPDeadlineExceeded",
+    "SPDriveNotFound",
+    "SPFileIntegrityError",
     "SPFolder",
     "SPFolderNotEmpty",
     "SPFolderNotFound",
+    "SPGraphError",
     "SharepointManager",
     "TokenProvider",
     "UserDelegatedCredential",
+    "SPThrottledError",
+    "SPValidationError",
 ]

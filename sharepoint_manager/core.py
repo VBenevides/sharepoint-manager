@@ -36,9 +36,14 @@ from .dataclasses import (
 from .exceptions import (
     SPDriveNotFound,
     SPAmbiguousWriteError,
+    SPAuthenticationError,
+    SPAuthorizationError,
+    SPConflictError,
     SPFileNotFound,
     SPFolderNotEmpty,
     SPFolderNotFound,
+    SPGraphError,
+    SPThrottledError,
     SPUnauthorizedTarget,
     SPValidationError,
 )
@@ -279,7 +284,7 @@ class SharepointManagerBase:
                 )
 
             if not isinstance(result, dict) or "access_token" not in result.keys():
-                raise RuntimeError("Authentication failed")
+                raise SPAuthenticationError("Authentication failed")
 
             token = str(result["access_token"])
             # Prefer 'expires_on' (epoch seconds as str) else compute from 'expires_in'
@@ -405,6 +410,32 @@ class SharepointManagerBase:
                 continue
             return resp
 
+    def _raise_for_status(self, response: requests.Response) -> None:
+        status = int(getattr(response, "status_code", 0))
+        if status < 400:
+            return
+        headers = getattr(response, "headers", {})
+        request_id = headers.get("request-id") or headers.get("client-request-id")
+        try:
+            response.raise_for_status()
+        except Exception as cause:
+            error = cause
+        else:
+            error = None
+        error_type = {
+            401: SPAuthorizationError,
+            403: SPAuthorizationError,
+            409: SPConflictError,
+            429: SPThrottledError,
+        }.get(status, SPGraphError)
+        raise error_type(
+            "Graph request failed",
+            status=status,
+            request_id=request_id,
+            retryable=status in _RETRY_STATUSES,
+            cause=error,
+        )
+
     def _paginate(self, url: str) -> Iterator[dict[str, Any]]:
         """Yield items across Graph pages following @odata.nextLink."""
         next_url: str | None = url
@@ -425,7 +456,7 @@ class SharepointManagerBase:
             r = self._request(
                 "GET", next_url, headers=self._hdr(), timeout=30, authenticated=True
             )
-            r.raise_for_status()
+            self._raise_for_status(r)
             try:
                 data = r.json()
             finally:
@@ -650,7 +681,7 @@ class SharepointManager(SharepointManagerBase):
         r = self._request(
             "GET", graph_url, headers=headers, timeout=30, authenticated=True
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         data = r.json()
         self._validate_item_boundary(data)
         file = SPFile.from_dict(data)
@@ -736,7 +767,7 @@ class SharepointManager(SharepointManagerBase):
         r = self._request(
             "POST", session_url, headers=self._hdr(json_content=True), json=body
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         upload_url = r.json()["uploadUrl"]
 
         # 3. Upload the file in chunks
@@ -753,7 +784,7 @@ class SharepointManager(SharepointManagerBase):
                     resp = self._request(
                         "PUT", content_url, headers=self._hdr(), data=b"", timeout=60
                     )
-                    resp.raise_for_status()
+                    self._raise_for_status(resp)
                 while start < file_size:
                     chunk = f.read(chunk_size)
                     curr_chunk_len = len(chunk)
@@ -769,7 +800,7 @@ class SharepointManager(SharepointManagerBase):
                     )
 
                     if resp.status_code not in (200, 201, 202):
-                        resp.raise_for_status()
+                        self._raise_for_status(resp)
 
                     next_start = end + 1
                     try:
@@ -835,7 +866,7 @@ class SharepointManager(SharepointManagerBase):
             response = self._request(
                 "GET", next_url, headers=self._hdr(), timeout=30, authenticated=True
             )
-            response.raise_for_status()
+            self._raise_for_status(response)
 
             try:
                 payload = response.json()
@@ -946,7 +977,7 @@ class SharepointManager(SharepointManagerBase):
         response = self._request(
             "GET", graph_url, headers=self._hdr(), timeout=30, authenticated=True
         )
-        response.raise_for_status()
+        self._raise_for_status(response)
 
         folder_item = response.json()
         self._validate_item_boundary(folder_item)
@@ -974,7 +1005,7 @@ class SharepointManager(SharepointManagerBase):
         # Quote the site path while preserving slashes.
         url = f"{self._graph_base_url}/sites/{host}:{quote_path(site)}"
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
-        r.raise_for_status()
+        self._raise_for_status(r)
         self._site_id = r.json()["id"]
         return self._site_id
 
@@ -1018,7 +1049,7 @@ class SharepointManager(SharepointManagerBase):
 
         if r.status_code == 404:
             raise SPFolderNotFound("SP Folder not found")
-        r.raise_for_status()
+        self._raise_for_status(r)
         return SPFolder.from_dict(r.json())
 
     def _get_file(self, filename: str, folder: SPFolder | None = None) -> SPFile:
@@ -1030,7 +1061,7 @@ class SharepointManager(SharepointManagerBase):
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
         if r.status_code == 404:
             raise SPFileNotFound("SP file not found")
-        r.raise_for_status()
+        self._raise_for_status(r)
         data = r.json()
         if "file" not in data:
             # Path resolved to a folder, not a file.
@@ -1052,7 +1083,7 @@ class SharepointManager(SharepointManagerBase):
             timeout=30,
             json=payload,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return SPFolder.from_dict(r.json())
 
     def _create_folder(self, folder_path: str) -> SPFolder | None:
@@ -1124,7 +1155,7 @@ class SharepointManager(SharepointManagerBase):
                 with self._request(
                     "GET", file_obj.download_url, stream=True, timeout=(10, 300)
                 ) as response:
-                    response.raise_for_status()
+                    self._raise_for_status(response)
                     for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
                         if chunk:
                             output.write(chunk)
@@ -1396,7 +1427,7 @@ class SharepointManager(SharepointManagerBase):
                 timeout=30,
                 json=request_body,
             )
-            r.raise_for_status()
+            self._raise_for_status(r)
             upload_session = r.json()
             upload_url = str(upload_session["uploadUrl"])
 
@@ -1410,7 +1441,7 @@ class SharepointManager(SharepointManagerBase):
                     response = self._request(
                         "PUT", content_url, headers=self._hdr(), data=b"", timeout=60
                     )
-                    response.raise_for_status()
+                    self._raise_for_status(response)
                 while True:
                     chunk = file.read(chunk_size)
                     if not chunk:
@@ -1431,7 +1462,7 @@ class SharepointManager(SharepointManagerBase):
                         timeout=60,
                         data=chunk,
                     )
-                    response.raise_for_status()
+                    self._raise_for_status(response)
 
                     next_start = start_byte + len(chunk)
                     try:
@@ -1724,7 +1755,7 @@ class SharepointManager(SharepointManagerBase):
             headers=self._hdr(),
             timeout=30,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
 
     def delete_folder(
         self,
@@ -1793,6 +1824,6 @@ class SharepointManager(SharepointManagerBase):
                 headers=self._hdr(),
                 timeout=30,
             )
-            r.raise_for_status()
+            self._raise_for_status(r)
         else:
             raise SPFolderNotEmpty("Sharepoint folder not empty")
