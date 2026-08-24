@@ -24,7 +24,14 @@ from msal import ConfidentialClientApplication, PublicClientApplication
 
 from .decorators import retry_if_not_exception, retry
 from .dataclasses import ClientCredential, UserDelegatedCredential, SPFolder, SPFile
-from .exceptions import SPFolderNotEmpty, SPFileNotFound, SPFolderNotFound
+from .exceptions import (
+    SPDriveNotFound,
+    SPFolderNotEmpty,
+    SPFileNotFound,
+    SPFolderNotFound,
+    SPUnauthorizedTarget,
+    SPValidationError,
+)
 from .utils import (
     get_filename,
     get_names_to_folder,
@@ -49,6 +56,23 @@ _UPLOAD_CHUNK_SIZE = 20 * _GRAPH_CHUNK_UNIT
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 # GUID pattern used to extract a tenant id from authorization URIs.
 _GUID_RE = re.compile(r"/([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})")
+_GRAPH_HOSTS = {
+    "graph.microsoft.com",
+    "graph.microsoft.us",
+    "dod-graph.microsoft.us",
+    "graph.microsoft.de",
+    "microsoftgraph.chinacloudapi.cn",
+}
+_MICROSOFT_CAPABILITY_SUFFIXES = (
+    ".sharepoint.com",
+    ".sharepoint.us",
+    ".sharepoint.de",
+    ".sharepoint.cn",
+    ".sharepoint-mil.us",
+    ".sharepoint-df.com",
+    ".1drv.com",
+)
+_SHAREPOINT_SUFFIXES = tuple(x for x in _MICROSOFT_CAPABILITY_SUFFIXES if x != ".1drv.com")
 
 
 class SharepointManagerBase:
@@ -86,10 +110,60 @@ class SharepointManagerBase:
             headers["Content-Type"] = "application/json"
         return headers
 
+    def _validate_graph_url(self, url: str) -> None:
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or parsed.hostname != self.graph_host
+            or parsed.port not in (None, 443)
+        ):
+            raise SPValidationError("Authenticated requests require the configured HTTPS Graph host")
+
+    def _validate_capability_url(self, url: str) -> None:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or parsed.port not in (None, 443)
+            or not (
+                host == self.graph_host
+                or any(host.endswith(suffix) for suffix in _MICROSOFT_CAPABILITY_SUFFIXES)
+            )
+        ):
+            raise SPValidationError("Capability URLs must use an approved HTTPS Microsoft host")
+
+    @staticmethod
+    def _validate_sharepoint_url(url: str) -> Any:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or parsed.port not in (None, 443)
+            or not any(host.endswith(suffix) for suffix in _SHAREPOINT_SUFFIXES)
+            or not ("/sites/" in parsed.path or "/teams/" in parsed.path)
+        ):
+            raise SPValidationError("SharePoint URLs must use an approved HTTPS site host")
+        return parsed
+
     def _get_tenant_id(self) -> str:
         """Retrieve the tenant ID from the SharePoint tenant URL."""
 
-        r = self._request("HEAD", self.tenant_url, headers={"Authorization": "Bearer"}, timeout=20)
+        r = self._request(
+            "HEAD",
+            self.tenant_url,
+            headers={"Authorization": "Bearer"},
+            timeout=20,
+            authenticated=False,
+        )
         params = parse_www_authenticate(r.headers.get("WWW-Authenticate", ""))
         realm = params.get("bearer realm") or params.get("realm")
         if realm:
@@ -126,11 +200,11 @@ class SharepointManagerBase:
                 result = self.ca.acquire_token_by_username_password(
                     username=self.credentials.username,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
                     password=self.credentials.password,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-                    scopes=["https://graph.microsoft.com/.default"],
+                    scopes=[f"https://{self.graph_host}/.default"],
                 )
             else:
                 result = self.ca.acquire_token_for_client(
-                    scopes=["https://graph.microsoft.com/.default"]
+                    scopes=[f"https://{self.graph_host}/.default"]
                 )
 
             if not isinstance(result, dict) or "access_token" not in result.keys():
@@ -173,7 +247,20 @@ class SharepointManagerBase:
         params: dict[str, Any] | None = None,
         stream: bool = False,
         max_attempts: int = 5,
+        authenticated: bool | None = None,
+        allow_redirects: bool | None = None,
     ) -> requests.Response:
+        if authenticated is None:
+            authenticated = bool(
+                headers
+                and str(headers.get("Authorization", "")).startswith("Bearer ")
+            )
+        if authenticated:
+            self._validate_graph_url(url)
+        elif url != self.tenant_url:
+            self._validate_capability_url(url)
+        if allow_redirects is None:
+            allow_redirects = not authenticated
         attempt = 1
         while True:
             resp = self._session.request(
@@ -185,7 +272,11 @@ class SharepointManagerBase:
                 data=data,
                 params=params,
                 stream=stream,
+                allow_redirects=allow_redirects,
             )
+            if authenticated and 300 <= resp.status_code < 400:
+                resp.close()
+                raise SPValidationError("Authenticated Graph redirects are not allowed")
             # Handle throttling / transient 5xx with Retry-After.
             if resp.status_code in _RETRY_STATUSES and attempt < max_attempts:
                 retry_after = resp.headers.get("Retry-After")
@@ -216,8 +307,15 @@ class SharepointManagerBase:
     def _paginate(self, url: str) -> Iterator[dict[str, Any]]:
         """Yield items across Graph pages following @odata.nextLink."""
         next_url: str | None = url
+        seen: set[str] = set()
         while next_url:
-            r = self._request("GET", next_url, headers=self._hdr(), timeout=30)
+            if next_url in seen:
+                raise SPValidationError("Repeated Graph pagination link")
+            seen.add(next_url)
+            self._validate_graph_url(next_url)
+            r = self._request(
+                "GET", next_url, headers=self._hdr(), timeout=30, authenticated=True
+            )
             r.raise_for_status()
             data = r.json()
             for item in data.get("value", []):
@@ -257,6 +355,7 @@ class SharepointManager(SharepointManagerBase):
         sharepoint_site_url: str,
         credentials: ClientCredential | UserDelegatedCredential,
         document_folder_name: str | None = None,
+        graph_host: str = "graph.microsoft.com",
     ) -> None:
         """
         Initializes the SharepointManager with a given SharePoint URL and credentials.
@@ -287,24 +386,29 @@ class SharepointManager(SharepointManagerBase):
         >>> )
         """
 
+        parsed_site_url = self._validate_sharepoint_url(sharepoint_site_url)
+        self.graph_host = graph_host.lower().rstrip(".")
+        if self.graph_host not in _GRAPH_HOSTS:
+            raise SPValidationError("graph_host must be an approved Microsoft Graph host")
+        self._graph_base_url = f"https://{self.graph_host}/v1.0"
         self._session: requests.Session = requests.Session()
         self.credentials: ClientCredential | UserDelegatedCredential = credentials
 
         self.url: str = sharepoint_site_url
-        if "/teams/" in self.url:
+        if "/teams/" in parsed_site_url.path:
             self.site_separator: Literal["/teams/", "/sites/"] = "/teams/"
-        elif "/sites/" in self.url:
+        elif "/sites/" in parsed_site_url.path:
             self.site_separator = "/sites/"
         else:
             raise ValueError(
                 "sharepoint_site_url must contain '/sites/' or '/teams/'. "
                 f"Got: {sharepoint_site_url!r}"
             )
-        self.tenant_url: str = sharepoint_site_url.split(self.site_separator, maxsplit=1)[0]
+        self.tenant_url: str = f"{parsed_site_url.scheme}://{parsed_site_url.netloc}"
         self.tenant_id: str = self._get_tenant_id()
 
         # These variables shouldn't be changed manually
-        self.site_name: str = self.url.split(self.site_separator, maxsplit=1)[-1]
+        self.site_name: str = parsed_site_url.path.split(self.site_separator, maxsplit=1)[-1]
 
         if isinstance(credentials, ClientCredential):
             self.ca = ConfidentialClientApplication(
@@ -395,7 +499,7 @@ class SharepointManager(SharepointManagerBase):
         base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
         encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
 
-        graph_url = f"https://graph.microsoft.com/v1.0/shares/{encoded_url}/driveItem"
+        graph_url = f"{self._graph_base_url}/shares/{encoded_url}/driveItem"
         headers = self._hdr()
 
         r = self._request("GET", graph_url, headers=headers, timeout=30)
@@ -490,7 +594,7 @@ class SharepointManager(SharepointManagerBase):
 
         # 2. Create the Upload Session
         session_url = (
-            f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+            f"{self._graph_base_url}/drives/{drive_id}"
             f"/items/{item_id}/createUploadSession"
         )
 
@@ -610,7 +714,7 @@ class SharepointManager(SharepointManagerBase):
 
         folder = self._get_folder(sp_relative_folder_path)
         start_url = (
-            f"https://graph.microsoft.com/v1.0/drives/{self._drive_id}/items/{folder.id}/delta"
+            f"{self._graph_base_url}/drives/{self._drive_id}/items/{folder.id}/delta"
         )
         return self._consume_delta(start_url)
 
@@ -650,7 +754,7 @@ class SharepointManager(SharepointManagerBase):
         base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
         encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
 
-        graph_url = f"https://graph.microsoft.com/v1.0/shares/{encoded_url}/driveItem"
+        graph_url = f"{self._graph_base_url}/shares/{encoded_url}/driveItem"
         response = self._request("GET", graph_url, headers=self._hdr(), timeout=30)
         response.raise_for_status()
 
@@ -662,7 +766,7 @@ class SharepointManager(SharepointManagerBase):
         if not drive_id or not item_id:
             raise RuntimeError("Folder metadata is missing driveId or id")
 
-        start_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/delta"
+        start_url = f"{self._graph_base_url}/drives/{drive_id}/items/{item_id}/delta"
         return self._consume_delta(start_url)
 
     # ----------------------------------------------------------
@@ -677,7 +781,7 @@ class SharepointManager(SharepointManagerBase):
         if self.site_separator not in site:
             site = f"{self.site_separator}{site}"
         # Quote the site path while preserving slashes.
-        url = f"https://graph.microsoft.com/v1.0/sites/{host}:{quote_path(site)}"
+        url = f"{self._graph_base_url}/sites/{host}:{quote_path(site)}"
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
         r.raise_for_status()
         self._site_id = r.json()["id"]
@@ -687,7 +791,7 @@ class SharepointManager(SharepointManagerBase):
         site_id = self._site_id
         r = self._request(
             "GET",
-            f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives",
+            f"{self._graph_base_url}/sites/{site_id}/drives",
             headers=self._hdr(),
             timeout=30,
         )
@@ -702,7 +806,7 @@ class SharepointManager(SharepointManagerBase):
         # or when no drive matched the supplied name.
         r = self._request(
             "GET",
-            f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive",
+            f"{self._graph_base_url}/sites/{site_id}/drive",
             headers=self._hdr(),
             timeout=30,
         )
@@ -723,7 +827,7 @@ class SharepointManager(SharepointManagerBase):
             site = ""
         r = self._request(
             "GET",
-            f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/root{site}",
+            f"{self._graph_base_url}/sites/{site_id}/drives/{drive_id}/root{site}",
             headers=self._hdr(),
             timeout=30,
         )
@@ -739,7 +843,7 @@ class SharepointManager(SharepointManagerBase):
         folder_id = str(self.folder.id)
         encoded_name = quote_segment(filename)
         url = (
-            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_id}:/{encoded_name}"
+            f"{self._graph_base_url}/drives/{drive_id}/items/{folder_id}:/{encoded_name}"
         )
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
         if r.status_code == 404:
@@ -762,7 +866,7 @@ class SharepointManager(SharepointManagerBase):
         payload = {"name": folder_name, "folder": {}}
         r = self._request(
             "POST",
-            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{parent_id}/children",
+            f"{self._graph_base_url}/drives/{drive_id}/items/{parent_id}/children",
             headers=self._hdr(json_content=True),
             timeout=30,
             json=payload,
@@ -897,7 +1001,7 @@ class SharepointManager(SharepointManagerBase):
         """
         target = folder if folder is not None else self.folder
         drive_id = self._drive_id
-        url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{target.id}/children"
+        url = f"{self._graph_base_url}/drives/{drive_id}/items/{target.id}/children"
         files: dict[str, SPFile] = {}
         folders: dict[str, SPFolder] = {}
         for item in self._paginate(url):
@@ -1015,7 +1119,7 @@ class SharepointManager(SharepointManagerBase):
             folder_id = self.folder.id
             encoded_name = quote_segment(file_name)
             url = (
-                f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}"
+                f"{self._graph_base_url}/sites/{site_id}/drives/{drive_id}"
                 f"/items/{folder_id}:/{encoded_name}:/createUploadSession"
             )
             request_body = {"@microsoft.graph.conflictBehavior": "replace"}
@@ -1336,7 +1440,7 @@ class SharepointManager(SharepointManagerBase):
         item_id = file.id
         r = self._request(
             "DELETE",
-            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}",
+            f"{self._graph_base_url}/drives/{drive_id}/items/{item_id}",
             headers=self._hdr(),
             timeout=30,
         )
@@ -1405,7 +1509,7 @@ class SharepointManager(SharepointManagerBase):
             folder_id = target.id
             r = self._request(
                 "DELETE",
-                f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{folder_id}",
+                f"{self._graph_base_url}/drives/{drive_id}/items/{folder_id}",
                 headers=self._hdr(),
                 timeout=30,
             )
