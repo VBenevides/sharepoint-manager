@@ -3,6 +3,7 @@ import re
 import ntpath
 from urllib.parse import quote
 import base64
+import posixpath
 
 
 class QuickXorHash:
@@ -140,6 +141,29 @@ def safe_join(base_dir: str, untrusted_name: str) -> str:
     if full != base_real and not full.startswith(base_real + os.sep):
         raise ValueError(f"Path traversal blocked: {untrusted_name!r}")
     return full
+
+
+def validate_archive_members(
+    members: list[tuple[str, int]], max_items: int, max_expanded_bytes: int
+) -> None:
+    """Reject archive traversal and expansion beyond the supplied budgets."""
+    if len(members) > max_items:
+        raise ValueError("Archive item budget exceeded")
+    expanded = 0
+    for name, size in members:
+        normalized = posixpath.normpath(name.replace("\\", "/"))
+        if (
+            not name
+            or "\x00" in name
+            or posixpath.isabs(normalized)
+            or normalized == ".."
+            or normalized.startswith("../")
+            or size < 0
+        ):
+            raise ValueError("Unsafe archive member")
+        expanded += size
+        if expanded > max_expanded_bytes:
+            raise ValueError("Archive expansion budget exceeded")
 
 
 def quote_path(path: str) -> str:

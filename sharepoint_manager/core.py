@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 import os
 import re
+import shutil
 import time
 import threading
 import logging
@@ -24,7 +25,14 @@ import requests
 from msal import ConfidentialClientApplication, PublicClientApplication
 
 from .decorators import retry_if_not_exception, retry
-from .dataclasses import ClientCredential, TokenProvider, UserDelegatedCredential, SPFolder, SPFile
+from .dataclasses import (
+    ClientCredential,
+    OperationPolicy,
+    TokenProvider,
+    UserDelegatedCredential,
+    SPFolder,
+    SPFile,
+)
 from .exceptions import (
     SPDriveNotFound,
     SPFolderNotEmpty,
@@ -298,6 +306,8 @@ class SharepointManagerBase:
         if allow_redirects is None:
             allow_redirects = not authenticated
         attempt = 1
+        policy = getattr(self, "policy", OperationPolicy())
+        max_attempts = min(max_attempts, policy.max_retry_attempts)
         while True:
             resp = self._session.request(
                 method=method,
@@ -329,6 +339,7 @@ class SharepointManagerBase:
                             delay = None
                 if delay is None:
                     delay = float(min(2**attempt, 60))
+                delay = min(delay, policy.max_retry_after_seconds)
                 # Release any streamed body before sleeping to avoid leaking
                 # connections back to the pool in CLOSE_WAIT.
                 try:
@@ -344,7 +355,11 @@ class SharepointManagerBase:
         """Yield items across Graph pages following @odata.nextLink."""
         next_url: str | None = url
         seen: set[str] = set()
+        page_count = 0
+        item_count = 0
         while next_url:
+            if page_count >= getattr(self, "policy", OperationPolicy()).max_pages:
+                raise SPValidationError("Graph page budget exceeded")
             if next_url in seen:
                 raise SPValidationError("Repeated Graph pagination link")
             seen.add(next_url)
@@ -354,7 +369,11 @@ class SharepointManagerBase:
             )
             r.raise_for_status()
             data = r.json()
+            page_count += 1
             for item in data.get("value", []):
+                item_count += 1
+                if item_count > getattr(self, "policy", OperationPolicy()).max_items:
+                    raise SPValidationError("Graph item budget exceeded")
                 yield item
             next_url = data.get("@odata.nextLink")
 
@@ -394,6 +413,7 @@ class SharepointManager(SharepointManagerBase):
         graph_host: str = "graph.microsoft.com",
         tenant_id: str | None = None,
         token_provider: TokenProvider | None = None,
+        policy: OperationPolicy | None = None,
     ) -> None:
         """
         Initializes the SharepointManager with a given SharePoint URL and credentials.
@@ -431,6 +451,7 @@ class SharepointManager(SharepointManagerBase):
         if self.graph_host not in _GRAPH_HOSTS:
             raise SPValidationError("graph_host must be an approved Microsoft Graph host")
         self._graph_base_url = f"https://{self.graph_host}/v1.0"
+        self.policy = policy or OperationPolicy()
         self._session: requests.Session = requests.Session()
         self.credentials = credentials
         self._token_provider = token_provider
@@ -600,6 +621,7 @@ class SharepointManager(SharepointManagerBase):
         os.makedirs(local_download_path, exist_ok=True)
 
         file_size_bytes = int(file_obj.size)
+        self._check_file_budget(file_size_bytes, local_download_path)
         file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
         download_url = file_obj.download_url
         logger.info("Downloading file %s (%s MB)", file_obj.name, file_size_mbytes)
@@ -971,6 +993,19 @@ class SharepointManager(SharepointManagerBase):
             raise SPUnauthorizedTarget("Configured drive does not match the selected resource grant")
         return True
 
+    def _check_file_budget(self, size: int, destination: str | None = None) -> None:
+        if size < 0 or size > self.policy.max_file_bytes or size > self.policy.max_total_bytes:
+            raise SPValidationError("File exceeds the configured transfer budget")
+        if destination is not None:
+            parent = os.path.dirname(os.path.abspath(destination)) or "."
+            if size > self.policy.max_disk_bytes or shutil.disk_usage(parent).free < size:
+                raise SPValidationError("Insufficient configured disk budget")
+
+    def _check_depth(self, path: str | None) -> None:
+        depth = len(get_names_to_folder(path or ""))
+        if depth > self.policy.max_depth:
+            raise SPValidationError("Folder depth exceeds the configured traversal budget")
+
     def get_file_author(self, file: SPFile) -> dict[str, dict[str, str]]:
         """
         Return author and editor metadata for a SharePoint file.
@@ -1173,6 +1208,8 @@ class SharepointManager(SharepointManagerBase):
         """
 
         local_file_path = os.path.abspath(local_file_path)
+        if os.path.islink(local_file_path):
+            raise SPValidationError("Symlink upload roots are not allowed")
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file does not exist: {local_file_path}")
         if not os.path.isfile(local_file_path):
@@ -1183,6 +1220,7 @@ class SharepointManager(SharepointManagerBase):
 
         file_name = get_filename(local_file_path)
         file_size_b = os.path.getsize(local_file_path)
+        self._check_file_budget(file_size_b)
         file_size_mb = file_size_b / (1024 * 1024)
 
         logger.info("Uploading file %s (%.1f MB)", file_name, file_size_mb)
@@ -1290,6 +1328,9 @@ class SharepointManager(SharepointManagerBase):
         """
 
         local_folder_path = os.path.abspath(local_folder_path)
+        self._check_depth(sp_relative_folder_path)
+        if os.path.islink(local_folder_path):
+            raise SPValidationError("Symlink upload roots are not allowed")
         if not os.path.exists(local_folder_path):
             raise FileNotFoundError(f"Local folder does not exist: {local_folder_path}")
         if not os.path.isdir(local_folder_path):
@@ -1312,9 +1353,11 @@ class SharepointManager(SharepointManagerBase):
             files: list[str] = []
             subdirs: list[str] = []
             for entry in entries:
-                if entry.is_file():
+                if entry.is_symlink():
+                    raise SPValidationError("Symlinks are not allowed in upload trees")
+                if entry.is_file(follow_symlinks=False):
                     files.append(entry.path)
-                elif entry.is_dir():
+                elif entry.is_dir(follow_symlinks=False):
                     subdirs.append(entry.path)
 
         # Switch into the destination folder for this level only; siblings
@@ -1367,6 +1410,7 @@ class SharepointManager(SharepointManagerBase):
         """
 
         local_download_path = os.path.abspath(local_download_path)
+        self._check_depth(sp_relative_folder_path)
 
         os.makedirs(local_download_path, exist_ok=True)
 
@@ -1379,6 +1423,7 @@ class SharepointManager(SharepointManagerBase):
             file_obj = file
 
         file_size_bytes = int(file_obj.size)
+        self._check_file_budget(file_size_bytes, local_download_path)
         file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
         download_url = file_obj.download_url
         logger.info("Downloading file %s (%s MB)", file_obj.name, file_size_mbytes)
@@ -1443,6 +1488,7 @@ class SharepointManager(SharepointManagerBase):
         """
 
         local_download_path = os.path.abspath(local_download_path)
+        self._check_depth(sp_relative_folder_path)
 
         if sp_relative_folder_path is not None:
             _ = self.set_folder(sp_relative_folder_path)

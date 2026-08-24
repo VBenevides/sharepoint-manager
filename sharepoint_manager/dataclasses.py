@@ -1,4 +1,5 @@
 from dataclasses import dataclass, fields, field
+import math
 from typing import Any, Protocol
 from .utils import camel_to_snake
 class TokenProvider(Protocol):
@@ -6,6 +7,45 @@ class TokenProvider(Protocol):
 
     def get_token(self, scope: str) -> Any:
         """Return a token string or an object with ``token``/``expires_on``."""
+
+
+@dataclass(frozen=True)
+class OperationPolicy:
+    """Finite resource and retry budgets for one manager."""
+
+    max_file_bytes: int = 10 * 1024**3
+    max_total_bytes: int = 100 * 1024**3
+    max_disk_bytes: int = 100 * 1024**3
+    max_archive_bytes: int = 10 * 1024**3
+    max_expanded_bytes: int = 100 * 1024**3
+    max_items: int = 100_000
+    max_depth: int = 64
+    max_pages: int = 1_000
+    max_concurrency: int = 1
+    wall_clock_seconds: float = 3_600.0
+    max_retry_attempts: int = 5
+    max_retry_after_seconds: float = 60.0
+
+    def __post_init__(self) -> None:
+        integer_fields = (
+            "max_file_bytes", "max_total_bytes", "max_disk_bytes",
+            "max_archive_bytes", "max_expanded_bytes", "max_items",
+            "max_depth", "max_pages", "max_concurrency", "max_retry_attempts",
+        )
+        for name in integer_fields:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        for name in ("wall_clock_seconds", "max_retry_after_seconds"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a finite positive number")
+        if self.max_file_bytes > self.max_total_bytes:
+            raise ValueError("max_file_bytes cannot exceed max_total_bytes")
+        if self.max_file_bytes > self.max_disk_bytes:
+            raise ValueError("max_file_bytes cannot exceed max_disk_bytes")
+        if self.max_archive_bytes > self.max_expanded_bytes:
+            raise ValueError("max_archive_bytes cannot exceed max_expanded_bytes")
 @dataclass(repr=False)
 class ClientCredential:
     client_id: str
