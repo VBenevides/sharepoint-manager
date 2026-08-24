@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 import warnings
@@ -667,37 +668,11 @@ class SharepointManager(SharepointManagerBase):
 
         file_size_bytes = int(file_obj.size)
         self._check_file_budget(file_size_bytes, local_download_path)
-        file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
-        download_url = file_obj.download_url
-        logger.info("Downloading file (%s MB)", file_size_mbytes)
-
-        chunk_size = _DOWNLOAD_CHUNK_SIZE
-        downloaded_bytes = 0
+        logger.info("Downloading file")
 
         filename = file_obj.name if new_filename is None else new_filename
         target_path = safe_join(local_download_path, filename)
-        last_log = 0.0
-        with self._request("GET", download_url, stream=True, timeout=(10, 300)) as r:
-            r.raise_for_status()
-            with open(target_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=chunk_size):
-                    if not chunk:
-                        continue
-                    _ = f.write(chunk)
-                    downloaded_bytes += len(chunk)
-                    now = time.monotonic()
-                    if (
-                        now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
-                        or downloaded_bytes >= file_size_bytes
-                    ):
-                        logger.info(
-                            "Downloaded %.1f MiB out of %.1f",
-                            downloaded_bytes / (1024 * 1024),
-                            file_size_bytes / (1024 * 1024),
-                        )
-                        last_log = now
-
-        logger.info("Download completed")
+        self._download_to_path(file_obj, target_path)
 
         return file_obj
 
@@ -1067,6 +1042,31 @@ class SharepointManager(SharepointManagerBase):
             raise SPValidationError(
                 "Folder depth exceeds the configured traversal budget"
             )
+
+    def _download_to_path(self, file_obj: SPFile, target_path: str) -> None:
+        """Stream to a sibling temporary file and atomically replace the target."""
+        directory = os.path.dirname(target_path) or "."
+        fd, temporary_path = tempfile.mkstemp(prefix=".sp-download-", dir=directory)
+        downloaded_bytes = 0
+        try:
+            with os.fdopen(fd, "wb") as output:
+                with self._request(
+                    "GET", file_obj.download_url, stream=True, timeout=(10, 300)
+                ) as response:
+                    response.raise_for_status()
+                    for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
+                        if chunk:
+                            output.write(chunk)
+                            downloaded_bytes += len(chunk)
+            if downloaded_bytes != int(file_obj.size):
+                raise SPValidationError("Downloaded content was incomplete")
+            os.replace(temporary_path, target_path)
+        except Exception:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
 
     def get_file_author(self, file: SPFile) -> dict[str, dict[str, str]]:
         """
@@ -1505,37 +1505,11 @@ class SharepointManager(SharepointManagerBase):
 
         file_size_bytes = int(file_obj.size)
         self._check_file_budget(file_size_bytes, local_download_path)
-        file_size_mbytes = round(file_size_bytes / (1024 * 1024), 1)
-        download_url = file_obj.download_url
-        logger.info("Downloading file (%s MB)", file_size_mbytes)
-
-        chunk_size = _DOWNLOAD_CHUNK_SIZE
-        downloaded_bytes = 0
+        logger.info("Downloading file")
 
         filename = file_obj.name if new_filename is None else new_filename
         target_path = safe_join(local_download_path, filename)
-        last_log = 0.0
-        with self._request("GET", download_url, stream=True, timeout=(10, 300)) as r:
-            r.raise_for_status()
-            with open(target_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=chunk_size):
-                    if not chunk:
-                        continue
-                    _ = f.write(chunk)
-                    downloaded_bytes += len(chunk)
-                    now = time.monotonic()
-                    if (
-                        now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
-                        or downloaded_bytes >= file_size_bytes
-                    ):
-                        logger.info(
-                            "Downloaded %.1f MiB out of %.1f",
-                            downloaded_bytes / (1024 * 1024),
-                            file_size_bytes / (1024 * 1024),
-                        )
-                        last_log = now
-
-        logger.info("Download completed")
+        self._download_to_path(file_obj, target_path)
 
         return file_obj
 
