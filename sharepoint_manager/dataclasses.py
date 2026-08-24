@@ -1,7 +1,10 @@
 from dataclasses import dataclass, fields, field
 import math
+from urllib.parse import unquote, urlsplit
 from typing import Any, Protocol
 from .utils import camel_to_snake
+
+
 class TokenProvider(Protocol):
     """Reusable token contract compatible with managed identity providers."""
 
@@ -28,9 +31,16 @@ class OperationPolicy:
 
     def __post_init__(self) -> None:
         integer_fields = (
-            "max_file_bytes", "max_total_bytes", "max_disk_bytes",
-            "max_archive_bytes", "max_expanded_bytes", "max_items",
-            "max_depth", "max_pages", "max_concurrency", "max_retry_attempts",
+            "max_file_bytes",
+            "max_total_bytes",
+            "max_disk_bytes",
+            "max_archive_bytes",
+            "max_expanded_bytes",
+            "max_items",
+            "max_depth",
+            "max_pages",
+            "max_concurrency",
+            "max_retry_attempts",
         )
         for name in integer_fields:
             value = getattr(self, name)
@@ -38,7 +48,11 @@ class OperationPolicy:
                 raise ValueError(f"{name} must be a positive integer")
         for name in ("wall_clock_seconds", "max_retry_after_seconds"):
             value = getattr(self, name)
-            if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            if (
+                not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
                 raise ValueError(f"{name} must be a finite positive number")
         if self.max_file_bytes > self.max_total_bytes:
             raise ValueError("max_file_bytes cannot exceed max_total_bytes")
@@ -46,6 +60,8 @@ class OperationPolicy:
             raise ValueError("max_file_bytes cannot exceed max_disk_bytes")
         if self.max_archive_bytes > self.max_expanded_bytes:
             raise ValueError("max_archive_bytes cannot exceed max_expanded_bytes")
+
+
 @dataclass(repr=False)
 class ClientCredential:
     client_id: str
@@ -85,7 +101,9 @@ class SPObject:
     e_tag: str = ""
 
 
-def dataclass_from_dict(cls, data: dict[str, Any], extra_mapping: dict[str, str] | None = None):
+def dataclass_from_dict(
+    cls, data: dict[str, Any], extra_mapping: dict[str, str] | None = None
+):
     valid_fields = {f.name for f in fields(cls)}
     # Work on a shallow copy to avoid mutating the caller's dict.
     working = dict(data)
@@ -123,8 +141,18 @@ class SPFolder(SPObject):
         We want to get everything after the documents folder: folder1/folder2
         """
 
-        # include "/" because root url ends with /documents_folder
-        parts = (self.web_url + "/").split("/")
+        parent_path = self.parent_reference.get("path", "")
+        if isinstance(parent_path, str) and "root:" in parent_path:
+            relative = parent_path.split("root:", 1)[1].strip("/")
+            parts = [unquote(part) for part in relative.split("/") if part]
+            if self.name:
+                parts.append(self.name)
+            return "/".join(parts)
+
+        # Fallback for older Graph payloads without parentReference.path.
+        parts = [
+            unquote(part) for part in urlsplit(self.web_url).path.split("/") if part
+        ]
         # skip sites, site_name, documents_folder
         try:
             id_start = parts.index("sites") + 3
@@ -133,10 +161,7 @@ class SPFolder(SPObject):
                 id_start = parts.index("teams") + 3
             except ValueError:
                 return ""
-        relative_url = "/".join(parts[id_start:])
-        if relative_url and relative_url[-1] == "/":
-            relative_url = relative_url[:-1]
-        return relative_url
+        return "/".join(parts[id_start:])
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPFolder":
@@ -152,7 +177,9 @@ class SPFile(SPObject):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPFile":
-        return dataclass_from_dict(cls, data, {"@microsoft.graph.downloadUrl": "download_url"})
+        return dataclass_from_dict(
+            cls, data, {"@microsoft.graph.downloadUrl": "download_url"}
+        )
 
 
 @dataclass(frozen=True)

@@ -82,7 +82,9 @@ _MICROSOFT_CAPABILITY_SUFFIXES = (
     ".sharepoint-df.com",
     ".1drv.com",
 )
-_SHAREPOINT_SUFFIXES = tuple(x for x in _MICROSOFT_CAPABILITY_SUFFIXES if x != ".1drv.com")
+_SHAREPOINT_SUFFIXES = tuple(
+    x for x in _MICROSOFT_CAPABILITY_SUFFIXES if x != ".1drv.com"
+)
 
 
 class SharepointManagerBase:
@@ -130,7 +132,9 @@ class SharepointManagerBase:
             or parsed.hostname != self.graph_host
             or parsed.port not in (None, 443)
         ):
-            raise SPValidationError("Authenticated requests require the configured HTTPS Graph host")
+            raise SPValidationError(
+                "Authenticated requests require the configured HTTPS Graph host"
+            )
 
     def _validate_capability_url(self, url: str) -> None:
         parsed = urlparse(url)
@@ -143,10 +147,14 @@ class SharepointManagerBase:
             or parsed.port not in (None, 443)
             or not (
                 host == self.graph_host
-                or any(host.endswith(suffix) for suffix in _MICROSOFT_CAPABILITY_SUFFIXES)
+                or any(
+                    host.endswith(suffix) for suffix in _MICROSOFT_CAPABILITY_SUFFIXES
+                )
             )
         ):
-            raise SPValidationError("Capability URLs must use an approved HTTPS Microsoft host")
+            raise SPValidationError(
+                "Capability URLs must use an approved HTTPS Microsoft host"
+            )
 
     @staticmethod
     def _validate_sharepoint_url(url: str) -> Any:
@@ -161,7 +169,9 @@ class SharepointManagerBase:
             or not any(host.endswith(suffix) for suffix in _SHAREPOINT_SUFFIXES)
             or not ("/sites/" in parsed.path or "/teams/" in parsed.path)
         ):
-            raise SPValidationError("SharePoint URLs must use an approved HTTPS site host")
+            raise SPValidationError(
+                "SharePoint URLs must use an approved HTTPS site host"
+            )
         return parsed
 
     def _validate_item_boundary(self, item: dict[str, Any]) -> None:
@@ -170,13 +180,19 @@ class SharepointManagerBase:
             raise SPUnauthorizedTarget("Resolved item has no trusted parent reference")
         drive_id = parent.get("driveId")
         site_id = parent.get("siteId")
-        if drive_id != self._drive_id or (site_id is not None and site_id != self._site_id):
-            raise SPUnauthorizedTarget("Resolved item is outside the configured SharePoint boundary")
+        if drive_id != self._drive_id or (
+            site_id is not None and site_id != self._site_id
+        ):
+            raise SPUnauthorizedTarget(
+                "Resolved item is outside the configured SharePoint boundary"
+            )
 
     def _validate_object_boundary(self, obj: SPFile | SPFolder) -> None:
         drive_id = obj.parent_reference.get("driveId")
         if drive_id != self._drive_id:
-            raise SPUnauthorizedTarget("File is outside the configured SharePoint boundary")
+            raise SPUnauthorizedTarget(
+                "File is outside the configured SharePoint boundary"
+            )
 
     def _validate_file_boundary(self, file: SPFile) -> None:
         self._validate_object_boundary(file)
@@ -225,7 +241,9 @@ class SharepointManagerBase:
             # Acquire a new token. Injected providers cover managed identity,
             # workload federation, certificates, and application-specific flows.
             if self._token_provider is not None:
-                result = self._token_provider.get_token(f"https://{self.graph_host}/.default")
+                result = self._token_provider.get_token(
+                    f"https://{self.graph_host}/.default"
+                )
                 token_value = getattr(result, "token", result)
                 expires_on = int(getattr(result, "expires_on", 0) or 0)
                 if isinstance(result, dict):
@@ -294,8 +312,7 @@ class SharepointManagerBase:
     ) -> requests.Response:
         if authenticated is None:
             authenticated = bool(
-                headers
-                and str(headers.get("Authorization", "")).startswith("Bearer ")
+                headers and str(headers.get("Authorization", "")).startswith("Bearer ")
             )
         if authenticated:
             self._validate_graph_url(url)
@@ -321,9 +338,15 @@ class SharepointManagerBase:
             if authenticated and 300 <= resp.status_code < 400:
                 resp.close()
                 raise SPValidationError("Authenticated Graph redirects are not allowed")
-            request_id = resp.headers.get("request-id") or resp.headers.get("client-request-id")
+            request_id = resp.headers.get("request-id") or resp.headers.get(
+                "client-request-id"
+            )
             if request_id:
-                logger.debug("Graph request status=%s request_id=%s", resp.status_code, request_id)
+                logger.debug(
+                    "Graph request status=%s request_id=%s",
+                    resp.status_code,
+                    request_id,
+                )
             # Handle throttling / transient 5xx with Retry-After.
             if resp.status_code in _RETRY_STATUSES and attempt < max_attempts:
                 retry_after = resp.headers.get("Retry-After")
@@ -450,7 +473,9 @@ class SharepointManager(SharepointManagerBase):
             raise ValueError("credentials or token_provider is required")
         self.graph_host = graph_host.lower().rstrip(".")
         if self.graph_host not in _GRAPH_HOSTS:
-            raise SPValidationError("graph_host must be an approved Microsoft Graph host")
+            raise SPValidationError(
+                "graph_host must be an approved Microsoft Graph host"
+            )
         self._graph_base_url = f"https://{self.graph_host}/v1.0"
         self.policy = policy or OperationPolicy()
         self._session: requests.Session = requests.Session()
@@ -471,7 +496,9 @@ class SharepointManager(SharepointManagerBase):
         self.tenant_id: str = tenant_id or self._get_tenant_id()
 
         # These variables shouldn't be changed manually
-        self.site_name: str = parsed_site_url.path.split(self.site_separator, maxsplit=1)[-1]
+        self.site_name: str = parsed_site_url.path.split(
+            self.site_separator, maxsplit=1
+        )[-1]
 
         if token_provider is not None:
             self.ca = None
@@ -508,9 +535,7 @@ class SharepointManager(SharepointManagerBase):
     # ----------------------------------------------------------
 
     def __repr__(self) -> str:
-        return (
-            f"SharepointManager(site={self.url!r}, document_folder={self.document_folder_name!r})"
-        )
+        return f"SharepointManager(site={self.url!r}, document_folder={self.document_folder_name!r})"
 
     def close(self) -> None:
         """Release the underlying HTTP session."""
@@ -576,7 +601,9 @@ class SharepointManager(SharepointManagerBase):
         graph_url = f"{self._graph_base_url}/shares/{encoded_url}/driveItem"
         headers = self._hdr()
 
-        r = self._request("GET", graph_url, headers=headers, timeout=30, authenticated=True)
+        r = self._request(
+            "GET", graph_url, headers=headers, timeout=30, authenticated=True
+        )
         r.raise_for_status()
         data = r.json()
         self._validate_item_boundary(data)
@@ -678,7 +705,9 @@ class SharepointManager(SharepointManagerBase):
         # Optional: Conflict behavior (fail, replace, or rename)
         body = {"item": {"@microsoft.graph.conflictBehavior": "replace"}}
 
-        r = self._request("POST", session_url, headers=self._hdr(json_content=True), json=body)
+        r = self._request(
+            "POST", session_url, headers=self._hdr(json_content=True), json=body
+        )
         r.raise_for_status()
         upload_url = r.json()["uploadUrl"]
 
@@ -701,14 +730,19 @@ class SharepointManager(SharepointManagerBase):
                         "Content-Length": str(curr_chunk_len),
                     }
 
-                    resp = self._request("PUT", upload_url, headers=headers, data=chunk, timeout=60)
+                    resp = self._request(
+                        "PUT", upload_url, headers=headers, data=chunk, timeout=60
+                    )
 
                     if resp.status_code not in (200, 201, 202):
                         resp.raise_for_status()
 
                     start = end + 1
                     now = time.monotonic()
-                    if now - last_log >= _PROGRESS_LOG_INTERVAL_SEC or start >= file_size:
+                    if (
+                        now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
+                        or start >= file_size
+                    ):
                         logger.info("Uploaded %s/%s bytes...", start, file_size)
                         last_log = now
         except Exception:
@@ -871,9 +905,9 @@ class SharepointManager(SharepointManagerBase):
         host = urlparse(self.url).hostname
         if not host:
             raise ValueError(f"Could not parse host from URL: {self.url!r}")
-        site = self.url.split(self.site_separator)[-1]
-        if self.site_separator not in site:
-            site = f"{self.site_separator}{site}"
+        site = self.site_name
+        site = "/".join(unquote(part) for part in site.split("/"))
+        site = f"{self.site_separator}{site}"
         # Quote the site path while preserving slashes.
         url = f"{self._graph_base_url}/sites/{host}:{quote_path(site)}"
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
@@ -929,9 +963,7 @@ class SharepointManager(SharepointManagerBase):
         drive_id = self._drive_id
         folder_id = str(self.folder.id)
         encoded_name = quote_segment(filename)
-        url = (
-            f"{self._graph_base_url}/drives/{drive_id}/items/{folder_id}:/{encoded_name}"
-        )
+        url = f"{self._graph_base_url}/drives/{drive_id}/items/{folder_id}:/{encoded_name}"
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
         if r.status_code == 404:
             raise SPFileNotFound("SP file not found")
@@ -989,23 +1021,36 @@ class SharepointManager(SharepointManagerBase):
     ) -> bool:
         """Validate that an optional deployment grant matches this manager."""
         if site_id is not None and site_id != self._site_id:
-            raise SPUnauthorizedTarget("Configured site does not match the selected resource grant")
+            raise SPUnauthorizedTarget(
+                "Configured site does not match the selected resource grant"
+            )
         if drive_id is not None and drive_id != self._drive_id:
-            raise SPUnauthorizedTarget("Configured drive does not match the selected resource grant")
+            raise SPUnauthorizedTarget(
+                "Configured drive does not match the selected resource grant"
+            )
         return True
 
     def _check_file_budget(self, size: int, destination: str | None = None) -> None:
-        if size < 0 or size > self.policy.max_file_bytes or size > self.policy.max_total_bytes:
+        if (
+            size < 0
+            or size > self.policy.max_file_bytes
+            or size > self.policy.max_total_bytes
+        ):
             raise SPValidationError("File exceeds the configured transfer budget")
         if destination is not None:
             parent = os.path.dirname(os.path.abspath(destination)) or "."
-            if size > self.policy.max_disk_bytes or shutil.disk_usage(parent).free < size:
+            if (
+                size > self.policy.max_disk_bytes
+                or shutil.disk_usage(parent).free < size
+            ):
                 raise SPValidationError("Insufficient configured disk budget")
 
     def _check_depth(self, path: str | None) -> None:
         depth = len(get_names_to_folder(path or ""))
         if depth > self.policy.max_depth:
-            raise SPValidationError("Folder depth exceeds the configured traversal budget")
+            raise SPValidationError(
+                "Folder depth exceeds the configured traversal budget"
+            )
 
     def get_file_author(self, file: SPFile) -> dict[str, dict[str, str]]:
         """
@@ -1044,7 +1089,9 @@ class SharepointManager(SharepointManagerBase):
         }
 
     @retry_if_not_exception(attempts=3, exceptions=(SPFolderNotFound))
-    def set_folder(self, sp_relative_folder_path: str, create_folder: bool = False) -> SPFolder:
+    def set_folder(
+        self, sp_relative_folder_path: str, create_folder: bool = False
+    ) -> SPFolder:
         """
         Set the current working folder.
 
@@ -1123,7 +1170,9 @@ class SharepointManager(SharepointManagerBase):
                 folders[fd.name] = fd
         return files, folders
 
-    def list_files(self, sp_relative_folder_path: str | None = None) -> dict[str, SPFile]:
+    def list_files(
+        self, sp_relative_folder_path: str | None = None
+    ) -> dict[str, SPFile]:
         """
         List files in a SharePoint folder.
 
@@ -1151,7 +1200,9 @@ class SharepointManager(SharepointManagerBase):
         files, _ = self._list_children()
         return files
 
-    def list_folders(self, sp_relative_folder_path: str | None = None) -> dict[str, SPFolder]:
+    def list_folders(
+        self, sp_relative_folder_path: str | None = None
+    ) -> dict[str, SPFolder]:
         """
         List subfolders in a SharePoint folder.
 
@@ -1184,7 +1235,9 @@ class SharepointManager(SharepointManagerBase):
     # ----------------------------------------------------------
 
     @retry_if_not_exception(attempts=3, exceptions=(FileNotFoundError))
-    def upload_file(self, local_file_path: str, sp_relative_folder_path: str | None = None) -> None:
+    def upload_file(
+        self, local_file_path: str, sp_relative_folder_path: str | None = None
+    ) -> None:
         """
         Upload a local file to SharePoint.
 
@@ -1214,7 +1267,9 @@ class SharepointManager(SharepointManagerBase):
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file does not exist: {local_file_path}")
         if not os.path.isfile(local_file_path):
-            raise FileNotFoundError(f"Path does not correspond to a file: {local_file_path}")
+            raise FileNotFoundError(
+                f"Path does not correspond to a file: {local_file_path}"
+            )
 
         if sp_relative_folder_path is not None:
             _ = self.set_folder(sp_relative_folder_path, create_folder=True)
@@ -1283,7 +1338,10 @@ class SharepointManager(SharepointManagerBase):
 
                     start_byte += len(chunk)
                     now = time.monotonic()
-                    if now - last_log >= _PROGRESS_LOG_INTERVAL_SEC or start_byte >= file_size_b:
+                    if (
+                        now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
+                        or start_byte >= file_size_b
+                    ):
                         logger.info(
                             "Uploaded %.1f MiB out of %.1f",
                             start_byte / (1024 * 1024),
@@ -1335,7 +1393,9 @@ class SharepointManager(SharepointManagerBase):
         if not os.path.exists(local_folder_path):
             raise FileNotFoundError(f"Local folder does not exist: {local_folder_path}")
         if not os.path.isdir(local_folder_path):
-            raise ValueError(f"Path does not correspond to a folder: {local_folder_path}")
+            raise ValueError(
+                f"Path does not correspond to a folder: {local_folder_path}"
+            )
 
         # Resolve the destination folder (creating it if needed) without
         # leaking ``self.folder`` mutation to the caller. ``cwd`` restores the
@@ -1513,7 +1573,9 @@ class SharepointManager(SharepointManagerBase):
         # Recurse using the resolved subfolder paths.
         cur_relative = cur_folder.relative_url
         for folder_name in subfolders:
-            folder_srp = f"{cur_relative}/{folder_name}" if cur_relative else folder_name
+            folder_srp = (
+                f"{cur_relative}/{folder_name}" if cur_relative else folder_name
+            )
             if folder_srp.startswith("/"):
                 folder_srp = folder_srp[1:]
             self.download_folder(
@@ -1521,7 +1583,9 @@ class SharepointManager(SharepointManagerBase):
                 folder_srp,
             )
 
-    def delete_file(self, file: str | SPFile, sp_relative_folder_path: str | None = None) -> None:
+    def delete_file(
+        self, file: str | SPFile, sp_relative_folder_path: str | None = None
+    ) -> None:
         """
         Delete a file from SharePoint.
 
