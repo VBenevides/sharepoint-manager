@@ -206,7 +206,8 @@ class SharepointManagerBase:
 
     def _validate_object_boundary(self, obj: SPFile | SPFolder) -> None:
         drive_id = obj.parent_reference.get("driveId")
-        if drive_id != self._drive_id:
+        site_id = obj.parent_reference.get("siteId")
+        if drive_id != self._drive_id or (site_id is not None and site_id != self._site_id):
             raise SPUnauthorizedTarget(
                 "File is outside the configured SharePoint boundary"
             )
@@ -741,6 +742,24 @@ class SharepointManager(SharepointManagerBase):
     # Direct URL methods (share URL)
     # ----------------------------------------------------------
 
+    def _get_drive_item_from_url(self, url: str) -> dict[str, Any]:
+        self._validate_sharepoint_url(url)
+        encoded_url = "u!" + base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+        response = self._request(
+            "GET",
+            f"{self._graph_base_url}/shares/{encoded_url}/driveItem",
+            headers=self._hdr(),
+            timeout=30,
+            authenticated=True,
+        )
+        try:
+            self._raise_for_status(response)
+            item = response.json()
+        finally:
+            response.close()
+        self._validate_item_boundary(item)
+        return item
+
     def get_file_metadata_from_url(self, url: str) -> SPFile:
         """
         Retrieve file metadata from a SharePoint file URL.
@@ -763,22 +782,78 @@ class SharepointManager(SharepointManagerBase):
         >>> file_metadata = manager.get_file_metadata_from_url(url = "https://tenant.sharepoint.com/...")
         """
 
-        self._validate_sharepoint_url(url)
-        base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
-        encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
+        data = self._get_drive_item_from_url(url)
+        if "file" not in data:
+            raise SPFileNotFound("SP file not found")
+        return SPFile.from_dict(data)
 
-        graph_url = f"{self._graph_base_url}/shares/{encoded_url}/driveItem"
-        headers = self._hdr()
+    def get_folder_metadata_from_url(self, url: str) -> SPFolder:
+        """Resolve an approved SharePoint folder URL within this manager's boundary."""
+        data = self._get_drive_item_from_url(url)
+        if "folder" not in data and "root" not in data:
+            raise SPFolderNotFound("SP folder not found")
+        return SPFolder.from_dict(data)
 
-        r = self._request(
-            "GET", graph_url, headers=headers, timeout=30, authenticated=True
+    def list_folder_from_url(
+        self, url: str
+    ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
+        """List files and folders below an approved SharePoint folder URL."""
+        return self._list_children(self.get_folder_metadata_from_url(url))
+
+    def create_folder_from_url(self, url: str, name: str) -> SPFolder:
+        """Create one child folder below an approved SharePoint folder URL."""
+        if not isinstance(name, str) or not name.strip() or any(c in name for c in "/\\\0"):
+            raise SPValidationError("Folder name must be one safe path segment")
+        parent = self.get_folder_metadata_from_url(url)
+        response = self._request(
+            "POST",
+            f"{self._graph_base_url}/drives/{self._drive_id}/items/{parent.id}/children",
+            headers=self._hdr(json_content=True),
+            timeout=30,
+            json={"name": name, "folder": {}},
         )
-        self._raise_for_status(r)
-        data = r.json()
+        try:
+            self._raise_for_status(response)
+            data = response.json()
+        finally:
+            response.close()
         self._validate_item_boundary(data)
-        file = SPFile.from_dict(data)
+        if "folder" not in data:
+            raise SPGraphError("Graph returned a non-folder item")
+        return SPFolder.from_dict(data)
 
-        return file
+    def delete_folder_from_url(self, url: str, force_delete: bool = False) -> None:
+        """Delete an approved SharePoint folder, requiring emptiness by default."""
+        self.delete_folder(self.get_folder_metadata_from_url(url), force_delete=force_delete)
+
+    def get_folder_permissions_from_url(self, url: str) -> tuple[dict[str, Any], ...]:
+        """Return normalized permissions without making an authorization decision."""
+        folder = self.get_folder_metadata_from_url(url)
+        permission_url = (
+            f"{self._graph_base_url}/drives/{self._drive_id}/items/{folder.id}/permissions"
+        )
+        return tuple(self._normalize_permission(item) for item in self._paginate(permission_url))
+
+    @staticmethod
+    def _normalize_permission(permission: dict[str, Any]) -> dict[str, Any]:
+        principal = permission.get("grantedToV2") or permission.get("grantedTo") or {}
+        principal_type = next(
+            (kind for kind in ("user", "group", "siteUser", "siteGroup", "application") if kind in principal),
+            None,
+        )
+        link = permission.get("link") or {}
+        return {
+            "id": str(permission.get("id", "")),
+            "roles": tuple(str(role) for role in permission.get("roles", ())),
+            "scope": link.get("scope", "direct"),
+            "type": link.get("type"),
+            "granted_to": {
+                "type": principal_type,
+                "id": principal.get(principal_type, {}).get("id") if principal_type else None,
+                "display_name": principal.get(principal_type, {}).get("displayName") if principal_type else None,
+            },
+            "expiration_datetime": permission.get("expirationDateTime"),
+        }
 
     def download_file_from_url(
         self,
@@ -1061,18 +1136,9 @@ class SharepointManager(SharepointManagerBase):
         if delta_link is not None:
             return self._consume_delta(delta_link)
 
-        self._validate_sharepoint_url(url)
-        base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
-        encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
-
-        graph_url = f"{self._graph_base_url}/shares/{encoded_url}/driveItem"
-        response = self._request(
-            "GET", graph_url, headers=self._hdr(), timeout=30, authenticated=True
-        )
-        self._raise_for_status(response)
-
-        folder_item = response.json()
-        self._validate_item_boundary(folder_item)
+        folder_item = self._get_drive_item_from_url(url)
+        if "folder" not in folder_item and "root" not in folder_item:
+            raise SPFolderNotFound("SP folder not found")
         parent_reference = folder_item.get("parentReference", {})
         drive_id = parent_reference.get("driveId")
         item_id = folder_item.get("id")
