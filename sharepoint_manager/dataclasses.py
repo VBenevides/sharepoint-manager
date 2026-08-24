@@ -211,3 +211,22 @@ class SPDeletedItem:
             parent_reference=dict(data.get("parentReference", {})),
             metadata=dict(data),
         )
+
+
+@dataclass(frozen=True)
+class SPCollectionPage:
+    """One lazy Graph collection page."""
+
+    items: tuple[dict[str, Any], ...]
+    next_link: str | None = None
+
+
+@dataclass(frozen=True)
+class SPDeltaPage:
+    """One lazy delta page and its caller-owned checkpoint links."""
+
+    files: tuple[SPFile, ...] = ()
+    folders: tuple[SPFolder, ...] = ()
+    deleted: tuple[SPDeletedItem, ...] = ()
+    next_link: str | None = None
+    delta_link: str | None = None

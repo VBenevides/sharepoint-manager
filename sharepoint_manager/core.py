@@ -28,6 +28,8 @@ from .dataclasses import (
     ClientCredential,
     OperationPolicy,
     SPDeletedItem,
+    SPCollectionPage,
+    SPDeltaPage,
     SPFile,
     SPFolder,
     TokenProvider,
@@ -473,6 +475,91 @@ class SharepointManagerBase:
                     raise SPValidationError("Graph item budget exceeded")
                 yield item
             next_url = data.get("@odata.nextLink")
+
+    def iter_collection(self, url: str) -> Iterator[SPCollectionPage]:
+        """Yield bounded, caller-consumable Graph collection pages."""
+        next_url: str | None = url
+        seen: set[str] = set()
+        page_count = 0
+        item_count = 0
+        started = time.monotonic()
+        while next_url:
+            policy = getattr(self, "policy", OperationPolicy())
+            if time.monotonic() - started > policy.wall_clock_seconds:
+                raise SPValidationError("Graph pagination deadline exceeded")
+            if page_count >= policy.max_pages:
+                raise SPValidationError("Graph page budget exceeded")
+            if next_url in seen:
+                raise SPValidationError("Repeated Graph pagination link")
+            seen.add(next_url)
+            self._validate_graph_url(next_url)
+            response = self._request(
+                "GET", next_url, headers=self._hdr(), timeout=30, authenticated=True
+            )
+            try:
+                self._raise_for_status(response)
+                payload = response.json()
+            finally:
+                response.close()
+            values = tuple(payload.get("value", []))
+            item_count += len(values)
+            if item_count > policy.max_items:
+                raise SPValidationError("Graph item budget exceeded")
+            page_count += 1
+            next_url = payload.get("@odata.nextLink")
+            yield SPCollectionPage(values, next_url)
+
+    def iter_folder_delta(
+        self, sp_relative_folder_path: str = "", delta_link: str | None = None
+    ) -> Iterator[SPDeltaPage]:
+        """Yield delta changes page by page and leave checkpoint persistence to the caller."""
+        if delta_link is None:
+            folder = self._get_folder(sp_relative_folder_path)
+            next_url: str | None = (
+                f"{self._graph_base_url}/drives/{self._drive_id}/items/{folder.id}/delta"
+            )
+        else:
+            next_url = delta_link
+        seen: set[str] = set()
+        page_count = 0
+        item_count = 0
+        started = time.monotonic()
+        while next_url:
+            policy = getattr(self, "policy", OperationPolicy())
+            if time.monotonic() - started > policy.wall_clock_seconds:
+                raise SPValidationError("Delta deadline exceeded")
+            if page_count >= policy.max_pages or next_url in seen:
+                raise SPValidationError("Invalid or repeated delta page")
+            seen.add(next_url)
+            self._validate_graph_url(next_url)
+            response = self._request(
+                "GET", next_url, headers=self._hdr(), timeout=30, authenticated=True
+            )
+            try:
+                self._raise_for_status(response)
+                payload = response.json()
+            finally:
+                response.close()
+            files = []
+            folders = []
+            deleted = []
+            for item in payload.get("value", []):
+                if "deleted" in item:
+                    deleted.append(SPDeletedItem.from_dict(item))
+                elif "file" in item:
+                    files.append(SPFile.from_dict(item))
+                elif "folder" in item:
+                    folders.append(SPFolder.from_dict(item))
+            item_count += len(files) + len(folders) + len(deleted)
+            if item_count > policy.max_items:
+                raise SPValidationError("Graph item budget exceeded")
+            next_page = payload.get("@odata.nextLink")
+            checkpoint = payload.get("@odata.deltaLink")
+            if checkpoint is not None:
+                self._validate_graph_url(checkpoint)
+            page_count += 1
+            next_url = next_page
+            yield SPDeltaPage(tuple(files), tuple(folders), tuple(deleted), next_page, checkpoint)
 
 
 class SharepointManager(SharepointManagerBase):

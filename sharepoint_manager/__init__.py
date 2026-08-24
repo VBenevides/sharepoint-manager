@@ -11,6 +11,8 @@ from .core import SharepointManager
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
+    SPCollectionPage,
+    SPDeltaPage,
     SPDeletedItem,
     SPFile,
     SPFolder,
@@ -39,6 +41,8 @@ __all__ = [
     "OperationPolicy",
     "QuickXorHash",
     "SPDeletedItem",
+    "SPCollectionPage",
+    "SPDeltaPage",
     "SPFile",
     "SPFileNotFound",
     "SPAmbiguousWriteError",
