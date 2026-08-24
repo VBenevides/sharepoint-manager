@@ -1,9 +1,11 @@
 from dataclasses import dataclass, fields, field
-from typing import Any
-
+from typing import Any, Protocol
 from .utils import camel_to_snake
+class TokenProvider(Protocol):
+    """Reusable token contract compatible with managed identity providers."""
 
-
+    def get_token(self, scope: str) -> Any:
+        """Return a token string or an object with ``token``/``expires_on``."""
 @dataclass(repr=False)
 class ClientCredential:
     client_id: str

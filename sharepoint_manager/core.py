@@ -16,6 +16,7 @@ import re
 import time
 import threading
 import logging
+import warnings
 from urllib.parse import urlparse, unquote
 
 import requests
@@ -23,7 +24,7 @@ import requests
 from msal import ConfidentialClientApplication, PublicClientApplication
 
 from .decorators import retry_if_not_exception, retry
-from .dataclasses import ClientCredential, UserDelegatedCredential, SPFolder, SPFile
+from .dataclasses import ClientCredential, TokenProvider, UserDelegatedCredential, SPFolder, SPFile
 from .exceptions import (
     SPDriveNotFound,
     SPFolderNotEmpty,
@@ -212,8 +213,26 @@ class SharepointManagerBase:
             if cached_token and (cached_expiry - now) > 120:
                 return str(cached_token)
 
-            # Acquire a new token
-            if isinstance(self.ca, PublicClientApplication):
+            # Acquire a new token. Injected providers cover managed identity,
+            # workload federation, certificates, and application-specific flows.
+            if self._token_provider is not None:
+                result = self._token_provider.get_token(f"https://{self.graph_host}/.default")
+                token_value = getattr(result, "token", result)
+                expires_on = int(getattr(result, "expires_on", 0) or 0)
+                if isinstance(result, dict):
+                    token_value = result.get("access_token", result.get("token"))
+                    expires_on = int(result.get("expires_on", 0) or 0)
+                result = {
+                    "access_token": token_value,
+                    "expires_on": expires_on,
+                    "expires_in": max(expires_on - now, 60) if expires_on else 3600,
+                }
+            elif isinstance(self.ca, PublicClientApplication):
+                warnings.warn(
+                    "UserDelegatedCredential/ROPC is deprecated; inject a delegated token provider",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
                 result = self.ca.acquire_token_by_username_password(
                     username=self.credentials.username,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
                     password=self.credentials.password,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
@@ -370,9 +389,11 @@ class SharepointManager(SharepointManagerBase):
     def __init__(
         self,
         sharepoint_site_url: str,
-        credentials: ClientCredential | UserDelegatedCredential,
+        credentials: ClientCredential | UserDelegatedCredential | None = None,
         document_folder_name: str | None = None,
         graph_host: str = "graph.microsoft.com",
+        tenant_id: str | None = None,
+        token_provider: TokenProvider | None = None,
     ) -> None:
         """
         Initializes the SharepointManager with a given SharePoint URL and credentials.
@@ -404,12 +425,15 @@ class SharepointManager(SharepointManagerBase):
         """
 
         parsed_site_url = self._validate_sharepoint_url(sharepoint_site_url)
+        if credentials is None and token_provider is None:
+            raise ValueError("credentials or token_provider is required")
         self.graph_host = graph_host.lower().rstrip(".")
         if self.graph_host not in _GRAPH_HOSTS:
             raise SPValidationError("graph_host must be an approved Microsoft Graph host")
         self._graph_base_url = f"https://{self.graph_host}/v1.0"
         self._session: requests.Session = requests.Session()
-        self.credentials: ClientCredential | UserDelegatedCredential = credentials
+        self.credentials = credentials
+        self._token_provider = token_provider
 
         self.url: str = sharepoint_site_url
         if "/teams/" in parsed_site_url.path:
@@ -422,18 +446,25 @@ class SharepointManager(SharepointManagerBase):
                 f"Got: {sharepoint_site_url!r}"
             )
         self.tenant_url: str = f"{parsed_site_url.scheme}://{parsed_site_url.netloc}"
-        self.tenant_id: str = self._get_tenant_id()
+        self.tenant_id: str = tenant_id or self._get_tenant_id()
 
         # These variables shouldn't be changed manually
         self.site_name: str = parsed_site_url.path.split(self.site_separator, maxsplit=1)[-1]
 
-        if isinstance(credentials, ClientCredential):
+        if token_provider is not None:
+            self.ca = None
+        elif isinstance(credentials, ClientCredential):
             self.ca = ConfidentialClientApplication(
                 client_id=credentials.client_id,
                 client_credential=credentials.client_secret,
                 authority=f"https://login.microsoftonline.com/{self.tenant_id}",
             )
         else:
+            warnings.warn(
+                "UserDelegatedCredential is deprecated; use an injected delegated token provider",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             self.ca = PublicClientApplication(
                 client_id=credentials.client_id,
                 authority=f"https://login.microsoftonline.com/{self.tenant_id}",
@@ -461,6 +492,9 @@ class SharepointManager(SharepointManagerBase):
 
     def close(self) -> None:
         """Release the underlying HTTP session."""
+        provider = getattr(self, "_token_provider", None)
+        if provider is not None and hasattr(provider, "close"):
+            provider.close()
         try:
             self._session.close()
         except Exception:
