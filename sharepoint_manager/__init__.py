@@ -5,6 +5,7 @@ from .exceptions import SPFileNotFound, SPFolderNotEmpty, SPFolderNotFound
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
+    SPDeletedItem,
     SPFile,
     SPFolder,
     TokenProvider,
@@ -19,6 +20,7 @@ __all__ = [
     "SPFolder",
     "ClientCredential",
     "OperationPolicy",
+    "SPDeletedItem",
     "TokenProvider",
     "UserDelegatedCredential",
     "SPFileNotFound",

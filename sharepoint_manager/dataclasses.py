@@ -153,3 +153,22 @@ class SPFile(SPObject):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPFile":
         return dataclass_from_dict(cls, data, {"@microsoft.graph.downloadUrl": "download_url"})
+
+
+@dataclass(frozen=True)
+class SPDeletedItem:
+    """A Graph delta tombstone preserved without a follow-up fetch."""
+
+    id: str
+    name: str = ""
+    parent_reference: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SPDeletedItem":
+        return cls(
+            id=str(data.get("id", "")),
+            name=str(data.get("name", "")),
+            parent_reference=dict(data.get("parentReference", {})),
+            metadata=dict(data),
+        )

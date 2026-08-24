@@ -28,6 +28,7 @@ from .decorators import retry_if_not_exception, retry
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
+    SPDeletedItem,
     TokenProvider,
     UserDelegatedCredential,
     SPFolder,
@@ -723,13 +724,17 @@ class SharepointManager(SharepointManagerBase):
             raise RuntimeError("Upload session produced no response (empty file?)")
         return SPFile.from_dict(resp.json())
 
-    def _consume_delta(self, start_url: str) -> tuple[str | None, list["SPFile"], list["SPFolder"]]:
+    def _consume_delta(
+        self, start_url: str
+    ) -> tuple[str | None, list["SPFile"], list["SPFolder"], list[SPDeletedItem]]:
         """Iterate a Microsoft Graph delta endpoint and return the latest delta
         link together with the files and folders it yields."""
 
         next_url: str | None = start_url
         seen: set[str] = set()
-        items: list[dict[str, Any]] = []
+        files: list[SPFile] = []
+        folders: list[SPFolder] = []
+        deleted: list[SPDeletedItem] = []
         latest_delta_link: str | None = None
         page_count = 0
 
@@ -744,7 +749,13 @@ class SharepointManager(SharepointManagerBase):
             response.raise_for_status()
 
             payload = response.json()
-            items.extend(payload.get("value", []))
+            for item in payload.get("value", []):
+                if "deleted" in item:
+                    deleted.append(SPDeletedItem.from_dict(item))
+                elif "file" in item:
+                    files.append(SPFile.from_dict(item))
+                elif "folder" in item:
+                    folders.append(SPFolder.from_dict(item))
 
             latest_delta_link = payload.get("@odata.deltaLink", latest_delta_link)
             next_url = payload.get("@odata.nextLink")
@@ -757,16 +768,13 @@ class SharepointManager(SharepointManagerBase):
                 page_count,
             )
 
-        files = [SPFile.from_dict(x) for x in items if "file" in x]
-        folders = [SPFolder.from_dict(x) for x in items if "folder" in x]
-
-        return latest_delta_link, files, folders
+        return latest_delta_link, files, folders, deleted
 
     def get_folder_delta(
         self,
         sp_relative_folder_path: str = "",
         delta_link: str | None = None,
-    ) -> tuple[str | None, list[SPFile], list[SPFolder]]:
+    ) -> tuple[str | None, list[SPFile], list[SPFolder], list[SPDeletedItem]]:
         """
         Return the latest delta link plus the files and folders found beneath a
         folder identified by its path relative to the document library root.
@@ -782,8 +790,8 @@ class SharepointManager(SharepointManagerBase):
 
         Returns
         -------
-        tuple[str | None, list[SPFile], list[SPFolder]]
-            The latest delta link, the list of files and the list of folders.
+        tuple[str | None, list[SPFile], list[SPFolder], list[SPDeletedItem]]
+            The latest delta link, changed files, changed folders, and tombstones.
 
         Examples
         --------
@@ -804,7 +812,7 @@ class SharepointManager(SharepointManagerBase):
         self,
         url: str,
         delta_link: str | None = None,
-    ) -> tuple[str | None, list[SPFile], list[SPFolder]]:
+    ) -> tuple[str | None, list[SPFile], list[SPFolder], list[SPDeletedItem]]:
         """
         Return the latest delta link plus the files and folders found beneath a
         folder identified by its absolute SharePoint URL.
