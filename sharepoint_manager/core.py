@@ -154,6 +154,23 @@ class SharepointManagerBase:
             raise SPValidationError("SharePoint URLs must use an approved HTTPS site host")
         return parsed
 
+    def _validate_item_boundary(self, item: dict[str, Any]) -> None:
+        parent = item.get("parentReference")
+        if not isinstance(parent, dict):
+            raise SPUnauthorizedTarget("Resolved item has no trusted parent reference")
+        drive_id = parent.get("driveId")
+        site_id = parent.get("siteId")
+        if drive_id != self._drive_id or (site_id is not None and site_id != self._site_id):
+            raise SPUnauthorizedTarget("Resolved item is outside the configured SharePoint boundary")
+
+    def _validate_object_boundary(self, obj: SPFile | SPFolder) -> None:
+        drive_id = obj.parent_reference.get("driveId")
+        if drive_id != self._drive_id:
+            raise SPUnauthorizedTarget("File is outside the configured SharePoint boundary")
+
+    def _validate_file_boundary(self, file: SPFile) -> None:
+        self._validate_object_boundary(file)
+
     def _get_tenant_id(self) -> str:
         """Retrieve the tenant ID from the SharePoint tenant URL."""
 
@@ -496,15 +513,18 @@ class SharepointManager(SharepointManagerBase):
         >>> file_metadata = manager.get_file_metadata_from_url(url = "https://tenant.sharepoint.com/...")
         """
 
+        self._validate_sharepoint_url(url)
         base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
         encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
 
         graph_url = f"{self._graph_base_url}/shares/{encoded_url}/driveItem"
         headers = self._hdr()
 
-        r = self._request("GET", graph_url, headers=headers, timeout=30)
+        r = self._request("GET", graph_url, headers=headers, timeout=30, authenticated=True)
         r.raise_for_status()
-        file = SPFile.from_dict(r.json())
+        data = r.json()
+        self._validate_item_boundary(data)
+        file = SPFile.from_dict(data)
 
         return file
 
@@ -651,14 +671,20 @@ class SharepointManager(SharepointManagerBase):
         """Iterate a Microsoft Graph delta endpoint and return the latest delta
         link together with the files and folders it yields."""
 
-        headers = self._hdr()
         next_url: str | None = start_url
+        seen: set[str] = set()
         items: list[dict[str, Any]] = []
         latest_delta_link: str | None = None
         page_count = 0
 
         while next_url:
-            response = self._request("GET", next_url, headers=headers, timeout=30)
+            if next_url in seen:
+                raise SPValidationError("Repeated Graph delta link")
+            seen.add(next_url)
+            self._validate_graph_url(next_url)
+            response = self._request(
+                "GET", next_url, headers=self._hdr(), timeout=30, authenticated=True
+            )
             response.raise_for_status()
 
             payload = response.json()
@@ -751,14 +777,18 @@ class SharepointManager(SharepointManagerBase):
         if delta_link is not None:
             return self._consume_delta(delta_link)
 
+        self._validate_sharepoint_url(url)
         base64_url = base64.b64encode(url.encode("utf-8")).decode("utf-8")
         encoded_url = "u!" + base64_url.rstrip("=").replace("/", "_").replace("+", "-")
 
         graph_url = f"{self._graph_base_url}/shares/{encoded_url}/driveItem"
-        response = self._request("GET", graph_url, headers=self._hdr(), timeout=30)
+        response = self._request(
+            "GET", graph_url, headers=self._hdr(), timeout=30, authenticated=True
+        )
         response.raise_for_status()
 
         folder_item = response.json()
+        self._validate_item_boundary(folder_item)
         parent_reference = folder_item.get("parentReference", {})
         drive_id = parent_reference.get("driveId")
         item_id = folder_item.get("id")
@@ -1435,6 +1465,8 @@ class SharepointManager(SharepointManagerBase):
 
         if isinstance(file, str):
             file = self._get_file(file)
+        else:
+            self._validate_file_boundary(file)
 
         drive_id = self._drive_id
         item_id = file.id
@@ -1501,6 +1533,7 @@ class SharepointManager(SharepointManagerBase):
                 target = self.folder
         else:
             target = folder
+            self._validate_object_boundary(target)
 
         files, folders = self._list_children(target)
 
