@@ -36,3 +36,7 @@ reportMissingImports = "none"
 reportAttributeAccessIssue = "none"
 reportArgumentType = "none"
 reportOptionalMemberAccess = "none"
+
+[tool.ruff.lint.per-file-ignores]
+# Verification scripts install test doubles before importing the package.
+"verification/*.py" = ["E402"]

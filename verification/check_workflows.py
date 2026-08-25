@@ -32,7 +32,11 @@ def main() -> None:
         "pip-audit",
         "pip-licenses",
         "cyclonedx-py environment",
-        "gitleaks/gitleaks-action@",
+        'bomFormat == "CycloneDX"',
+        'components | type == "array"',
+        "gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e",
+        "pull-requests: write",
+        "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
     ):
         assert required in security, required
 
