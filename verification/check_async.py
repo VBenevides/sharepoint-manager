@@ -6,6 +6,7 @@ import time
 import types
 import warnings
 from pathlib import Path
+from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 msal = types.ModuleType("msal")
@@ -50,9 +51,24 @@ class Client:
         try:
             if self.request_latency:
                 await asyncio.sleep(self.request_latency)
+            if url.endswith("/sites/demo"):
+                return Response({"id": "site"})
+            if url.endswith("/sites/site/drive"):
+                return Response(
+                    {
+                        "id": "drive",
+                        "name": "Documents",
+                        "webUrl": "https://tenant.sharepoint.com/sites/demo/Documents",
+                    }
+                )
             if "/shares/" in url:
                 share_id = url.split("/shares/", 1)[1].split("/", 1)[0]
                 return Response(self.items[share_id])
+            if "/root:/" in url:
+                name = unquote(url.rsplit("/", 1)[-1])
+                return Response(
+                    next(item for item in self.items.values() if item.get("name") == name)
+                )
             if "/children" in url:
                 if method == "POST":
                     return Response(
@@ -139,8 +155,6 @@ async def main() -> None:
         policy=OperationPolicy(max_concurrency=2),
         client=client,
     )
-    manager._site_id = "site"
-    manager._drive_id = "drive"
     file_payload = {
         "id": "file",
         "name": "remote.bin",
@@ -270,6 +284,11 @@ async def main() -> None:
         assert first.read_bytes() == b"payload"
         assert second.read_bytes() == b"payload"
         assert client.max_active == 2
+        sharing_url = "https://tenant.sharepoint.com/:f:/s/sites/demo/Eabc"
+        client.items[manager._share_id(sharing_url)] = file_payload
+        sharing_file = Path(directory) / "sharing.bin"
+        await manager.download_file_from_url(sharing_url, str(sharing_file))
+        assert sharing_file.read_bytes() == b"payload"
 
         for limit in (1, 2):
             stream_client = StreamingClient()
@@ -282,6 +301,7 @@ async def main() -> None:
             )
             stream_manager._site_id = "site"
             stream_manager._drive_id = "drive"
+            stream_manager._drive_url_name = "Documents"
             await asyncio.gather(
                 *(
                     stream_manager.download_file_from_url(
@@ -331,6 +351,7 @@ async def main() -> None:
         )
         workload_manager._site_id = "site"
         workload_manager._drive_id = "drive"
+        workload_manager._drive_url_name = "Documents"
         workload_client.items[workload_manager._share_id(folder_url)] = folder_payload
         with tempfile.TemporaryDirectory() as workload_directory:
             workload_files = []
@@ -390,10 +411,11 @@ async def main() -> None:
         else:
             raise AssertionError("async cross-drive item was accepted")
 
-        oversized_url = "https://tenant.sharepoint.com/sites/demo/Other/oversized.bin"
+        oversized_url = "https://tenant.sharepoint.com/sites/demo/Documents/oversized.bin"
         client.items[manager._share_id(oversized_url)] = {
             **file_payload,
             "id": "oversized",
+            "name": "oversized.bin",
             "size": 3,
         }
         oversized = Path(directory) / "oversized.bin"

@@ -16,10 +16,13 @@ from sharepoint_manager.exceptions import SPUnauthorizedTarget
 
 def main() -> None:
     manager = object.__new__(SharepointManagerBase)
-    manager._site_id = "site-a"
+    manager._site_id = "tenant.sharepoint.com,site-a,web-a"
     manager._drive_id = "drive-a"
     allowed = {"parentReference": {"siteId": "site-a", "driveId": "drive-a"}}
     manager._validate_item_boundary(allowed)
+    manager._validate_item_boundary(
+        {"parentReference": {"siteId": "web-a", "driveId": "drive-a"}}
+    )
 
     for item in (
         {"parentReference": {"siteId": "site-b", "driveId": "drive-a"}},

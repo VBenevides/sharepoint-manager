@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
 from .core import _DIRECT_UPLOAD_MAX_BYTES, SharepointManagerBase
@@ -39,7 +39,14 @@ from .exceptions import (
     SPUnauthorizedTarget,
     SPValidationError,
 )
-from .urls import GRAPH_HOSTS, share_id, validate_capability_url, validate_graph_url
+from .urls import (
+    GRAPH_HOSTS,
+    safe_graph_error_detail,
+    share_id,
+    sharepoint_location_path,
+    validate_capability_url,
+    validate_graph_url,
+)
 from .utils import QuickXorHash, safe_join
 
 _CHUNK_SIZE = 20 * 327680
@@ -97,6 +104,7 @@ class AsyncSharepointManager:
         self._account: Any | None = None
         self._site_id: str | None = None
         self._drive_id: str | None = None
+        self._drive_url_name: str | None = None
         self._user_credentials = isinstance(credentials, UserDelegatedCredential)
         self._username = credentials.username if self._user_credentials else None
         self._password: str | None = (
@@ -394,6 +402,9 @@ class AsyncSharepointManager:
         request_id = response.headers.get("request-id") or response.headers.get(
             "client-request-id"
         )
+        detail = safe_graph_error_detail(response)
+        if detail:
+            message = f"{message}: {detail}"
         raise error_type(
             message,
             status=status,
@@ -425,11 +436,19 @@ class AsyncSharepointManager:
                 "GET", f"{self._graph_base_url}/sites/{site_id}/drive"
             )
             self._raise_for_status(response, not_found=SPFolderNotFound)
-            drive_id = response.json().get("id")
+            drive = response.json()
+            drive_id = drive.get("id")
             if not drive_id:
                 raise SPUnauthorizedTarget("Configured SharePoint drive has no ID")
             self._site_id = site_id
             self._drive_id = drive_id
+            web_url = drive.get("webUrl")
+            if isinstance(web_url, str) and web_url:
+                self._drive_url_name = unquote(
+                    urlsplit(web_url).path.rstrip("/").split("/")[-1]
+                )
+            else:
+                self._drive_url_name = str(drive.get("name", ""))
 
     def _validate_boundary(self, item: dict[str, Any]) -> None:
         SharepointManagerBase._validate_item_boundary(self, item)
@@ -439,12 +458,32 @@ class AsyncSharepointManager:
     ) -> dict[str, Any]:
         SharepointManagerBase._validate_sharepoint_url(url)
         await self._ensure_boundary()
+        relative_path = sharepoint_location_path(
+            url,
+            self.sharepoint_site_url,
+            self._drive_url_name or "",
+        )
+        if relative_path is not None:
+            endpoint = f"{self._graph_base_url}/drives/{self._drive_id}/root"
+            if relative_path:
+                endpoint += f":/{quote(relative_path, safe='/')}"
+            response = await self._retry_request("GET", endpoint)
+            try:
+                self._raise_for_status(response, not_found=not_found)
+                item = response.json()
+            finally:
+                await self._close_response(response)
+            self._validate_boundary(item)
+            return item
         response = await self._retry_request(
             "GET",
             f"https://{self.graph_host}/v1.0/shares/{self._share_id(url)}/driveItem",
         )
-        self._raise_for_status(response, not_found=not_found)
-        item = response.json()
+        try:
+            self._raise_for_status(response, not_found=not_found)
+            item = response.json()
+        finally:
+            await self._close_response(response)
         self._validate_boundary(item)
         return item
 

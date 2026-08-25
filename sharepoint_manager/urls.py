@@ -1,9 +1,10 @@
 """Pure URL and host validation shared by the sync and async clients."""
 
 import base64
-from urllib.parse import urlparse
+import re
+from urllib.parse import unquote, urlparse
 
-from .exceptions import SPValidationError
+from .exceptions import SPUnauthorizedTarget, SPValidationError
 
 GRAPH_HOSTS = frozenset(
     {
@@ -26,6 +27,7 @@ MICROSOFT_CAPABILITY_SUFFIXES = (
 SHAREPOINT_SUFFIXES = tuple(
     suffix for suffix in MICROSOFT_CAPABILITY_SUFFIXES if suffix != ".1drv.com"
 )
+_LOCATION_REDIRECT_RE = re.compile(r"^/:[^/]+:/r(?P<path>/.*)$")
 
 
 def validate_graph_url(url: str, graph_host: str) -> None:
@@ -80,3 +82,49 @@ def validate_sharepoint_url(url: str):
 
 def share_id(url: str) -> str:
     return "u!" + base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+
+
+def sharepoint_location_path(
+    url: str, configured_site_url: str, drive_url_name: str
+) -> str | None:
+    """Return the drive-relative path from a browser SharePoint URL."""
+    parsed = urlparse(url)
+    configured = urlparse(configured_site_url)
+    if parsed.netloc.lower() != configured.netloc.lower():
+        return None
+    path = unquote(parsed.path).rstrip("/") or "/"
+    site_path = unquote(configured.path).rstrip("/") or "/"
+    redirect = _LOCATION_REDIRECT_RE.match(path)
+    if redirect:
+        path = redirect.group("path").rstrip("/") or "/"
+    if path != site_path and not path.startswith(f"{site_path}/"):
+        return None
+
+    relative = path[len(site_path) :].strip("/")
+    drive_name = unquote(drive_url_name).strip("/")
+    if relative == drive_name:
+        return ""
+    prefix = f"{drive_name}/"
+    if not relative.startswith(prefix):
+        raise SPUnauthorizedTarget(
+            "Resolved URL is outside the configured SharePoint drive"
+        )
+    return relative[len(prefix) :]
+
+
+def safe_graph_error_detail(response) -> str | None:
+    """Expose only the known safe Graph detail used for stale sharing links."""
+    try:
+        payload = response.json()
+        message = payload.get("error", {}).get("message")
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not isinstance(message, str):
+        return None
+    normalized = " ".join(message.split())
+    if normalized.rstrip(".").lower() in {
+        "sharing link no longer available",
+        "the sharing link is no longer available",
+    }:
+        return normalized
+    return None

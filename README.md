@@ -101,9 +101,9 @@ or another provider, inject a `TokenProvider` with `get_token(scope)`.
 - `iter_collection()` yields bounded `SPCollectionPage` values lazily.
   `iter_folder_delta()` yields `SPDeltaPage` values containing files, folders,
   tombstones, and checkpoint links. Persist `delta_link` in the caller's store.
-- Approved SharePoint URLs support folder metadata, listing, creation, empty
-  deletion, normalized permissions, and file transfers. Site/drive boundaries
-  are checked before operations.
+- Approved SharePoint browser location URLs and sharing links support folder
+  metadata, listing, creation, empty deletion, normalized permissions, and file
+  transfers. Site/drive boundaries are checked before operations.
 
 ## Limits, retries, and errors
 
