@@ -191,12 +191,7 @@ class AsyncSharepointManager:
                     "expires_in": max(expires_on - now, 60) if expires_on else 3600,
                 }
             if not isinstance(result, dict) or "access_token" not in result:
-                detail = (
-                    result.get("error_description", "Authentication failed")
-                    if isinstance(result, dict)
-                    else "Authentication failed"
-                )
-                raise SPAuthenticationError(str(detail))
+                raise SPAuthenticationError("Authentication failed")
             self._cached_token = str(result["access_token"])
             expires_on = int(result.get("expires_on", 0) or 0)
             if not expires_on:

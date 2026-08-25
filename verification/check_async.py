@@ -22,6 +22,7 @@ from sharepoint_manager import (
 )
 from sharepoint_manager.core import _DIRECT_UPLOAD_MAX_BYTES
 from sharepoint_manager.exceptions import (
+    SPAuthenticationError,
     SPDeadlineExceeded,
     SPUnauthorizedTarget,
     SPValidationError,
@@ -202,6 +203,22 @@ async def main() -> None:
     finally:
         sys.modules["msal"] = original_msal
         async_core.asyncio.to_thread = original_to_thread
+
+    class FailingProvider:
+        def get_token(self, scope):
+            return {"error": "invalid_grant", "error_description": "secret-canary"}
+
+    failing_manager = AsyncSharepointManager(
+        "https://tenant.sharepoint.com/sites/demo",
+        token_provider=FailingProvider(),
+        client=Client(),
+    )
+    try:
+        await failing_manager._ensure_token()
+    except SPAuthenticationError as exc:
+        assert "secret-canary" not in str(exc)
+    else:
+        raise AssertionError("failed token response was accepted")
 
     client = Client()
     manager = AsyncSharepointManager(
