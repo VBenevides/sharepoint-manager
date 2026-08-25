@@ -407,10 +407,7 @@ class AsyncSharepointManager:
         status = int(response.status_code)
         if status < 400:
             return
-        if status == 401:
-            error_type = SPAuthenticationError
-            message = "Graph authentication failed"
-        elif status == 403:
+        if status in {401, 403}:
             error_type = SPAuthorizationError
             message = "Graph resource request failed"
         elif status == 404:
