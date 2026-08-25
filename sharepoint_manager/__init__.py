@@ -1,5 +1,11 @@
+import logging
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+
+_logger = logging.getLogger(__name__)
+if _logger.level == logging.NOTSET:
+    _logger.setLevel(logging.WARNING)
+_logger.addHandler(logging.NullHandler())
 
 try:
     __version__ = version("sharepoint_manager")
