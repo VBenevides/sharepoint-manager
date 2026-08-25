@@ -543,6 +543,7 @@ class AsyncSharepointManager:
                         _DOWNLOAD_CHUNK_SIZE
                     )
                     with os.fdopen(fd, "wb") as output:
+                        fd = None
                         async for chunk in chunks:
                             await self._consume_chunk(
                                 output,
@@ -559,6 +560,7 @@ class AsyncSharepointManager:
                 )
                 self._raise_for_status(response)
                 with os.fdopen(fd, "wb") as output:
+                    fd = None
                     chunk = response.content
                     await self._consume_chunk(
                         output, chunk, digest, budget, downloaded, int(item.size)
@@ -572,6 +574,8 @@ class AsyncSharepointManager:
                 )
             os.replace(temporary, destination)
         finally:
+            if fd is not None:
+                os.close(fd)
             try:
                 os.unlink(temporary)
             except FileNotFoundError:

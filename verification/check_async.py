@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 import tempfile
 import time
@@ -287,6 +288,25 @@ async def main() -> None:
         else:
             raise AssertionError("async oversized response accepted")
         assert not oversized.exists()
+
+        descriptor_count = len(os.listdir("/proc/self/fd"))
+
+        def fail_stream(method, url):
+            raise RuntimeError("stream setup failed")
+
+        client.stream = fail_stream
+        setup_failure = Path(directory) / "setup-failure.bin"
+        try:
+            await manager.download_file_from_url(file_url, str(setup_failure))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("stream setup failure was swallowed")
+        finally:
+            del client.stream
+        assert not setup_failure.exists()
+        assert not list(Path(directory).glob(".sp-async-download-*"))
+        assert len(os.listdir("/proc/self/fd")) <= descriptor_count
 
         local_folder = Path(directory) / "local-folder"
         local_folder.mkdir()
