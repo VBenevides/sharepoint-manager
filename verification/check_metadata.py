@@ -1,4 +1,6 @@
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -20,6 +22,30 @@ def main() -> None:
     assert not (root / "requirements-build.txt").exists()
     assert "VERSION" in init
     assert version == "0.1.0"
+
+    code = """
+import importlib.metadata
+import sys
+import types
+
+importlib.metadata.version = lambda name: (_ for _ in ()).throw(
+    importlib.metadata.PackageNotFoundError(name)
+)
+msal = types.ModuleType("msal")
+msal.ConfidentialClientApplication = type("Confidential", (), {})
+msal.PublicClientApplication = type("Public", (), {})
+sys.modules["msal"] = msal
+sys.path.insert(0, ".")
+import sharepoint_manager
+assert sharepoint_manager.__version__ == "0.1.0"
+"""
+    subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 if __name__ == "__main__":
