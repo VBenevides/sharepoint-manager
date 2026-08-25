@@ -35,6 +35,9 @@ jobs:
           python -m unittest discover -s tests -v
       - name: Dependency consistency
         run: python -m pip check
+      - name: Audit minimum dependencies
+        if: matrix.dependencies == 'minimum'
+        run: pip-audit --progress-spinner off
 
   static:
     name: Static checks
