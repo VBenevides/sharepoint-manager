@@ -15,6 +15,7 @@ def main() -> None:
         "ruff check",
         "pyright sharepoint_manager",
         "python -m build",
+        "pip-audit --progress-spinner off",
     ):
         assert required in workflow, required
 

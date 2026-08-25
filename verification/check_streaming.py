@@ -2,6 +2,7 @@ import io
 import sys
 import types
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 msal = types.ModuleType("msal")
@@ -11,6 +12,7 @@ sys.modules.setdefault("msal", msal)
 
 from sharepoint_manager.core import SharepointManager
 from sharepoint_manager.dataclasses import OperationPolicy, SPFile
+from sharepoint_manager.exceptions import SPValidationError
 
 
 class NonSeekable(io.BytesIO):
@@ -34,6 +36,39 @@ def main() -> None:
     manager._stream_download = lambda file, output: output.write(b"abc")
     output = io.BytesIO()
     assert manager.download_fileobj("file.txt", output).id == "file"
+    assert output.getvalue() == b"abc"
+
+    class Response:
+        headers: ClassVar[dict[str, str]] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def iter_content(self, chunk_size):
+            yield b"abc"
+            yield b"de"
+
+    manager._request = lambda *args, **kwargs: Response()
+    manager._raise_for_status = lambda response: None
+    output = io.BytesIO()
+    try:
+        SharepointManager._stream_download(
+            manager,
+            SPFile(
+                id="oversized",
+                name="oversized.bin",
+                size=3,
+                download_url="https://download.sharepoint.com/file",
+            ),
+            output,
+        )
+    except SPValidationError:
+        pass
+    else:
+        raise AssertionError("oversized streamed response accepted")
     assert output.getvalue() == b"abc"
 
     captured = {}

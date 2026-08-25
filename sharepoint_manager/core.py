@@ -53,7 +53,9 @@ from .exceptions import (
 )
 from .urls import (
     GRAPH_HOSTS,
+    safe_graph_error_detail,
     share_id,
+    sharepoint_location_path,
     validate_capability_url,
     validate_graph_url,
     validate_sharepoint_url,
@@ -161,8 +163,12 @@ class SharepointManagerBase:
             raise SPUnauthorizedTarget("Resolved item has no trusted parent reference")
         drive_id = parent.get("driveId")
         site_id = parent.get("siteId")
+        configured_site_id = str(self._site_id)
+        configured_site_ids = {configured_site_id}
+        if "," in configured_site_id:
+            configured_site_ids.update(configured_site_id.split(",")[1:])
         if drive_id != self._drive_id or (
-            site_id is not None and site_id != self._site_id
+            site_id is not None and site_id not in configured_site_ids
         ):
             raise SPUnauthorizedTarget(
                 "Resolved item is outside the configured SharePoint boundary"
@@ -563,8 +569,12 @@ class SharepointManagerBase:
             failure_class=error_type.__name__,
             retryable=status in _RETRY_STATUSES,
         )
+        message = "Graph request failed"
+        detail = safe_graph_error_detail(response)
+        if detail:
+            message = f"{message}: {detail}"
         raise error_type(
-            "Graph request failed",
+            message,
             status=status,
             request_id=request_id,
             retryable=status in _RETRY_STATUSES,
@@ -921,10 +931,41 @@ class SharepointManager(SharepointManagerBase):
     # Direct URL methods (share URL)
     # ----------------------------------------------------------
 
+    def _get_drive_item_from_path(
+        self, relative_path: str, *, not_found: type[SPNotFoundError]
+    ) -> dict[str, Any]:
+        endpoint = f"{self._graph_base_url}/drives/{self._drive_id}/root"
+        if relative_path:
+            endpoint += f":/{quote_path(relative_path)}"
+        response = self._request(
+            "GET",
+            endpoint,
+            headers=self._hdr(),
+            timeout=30,
+            authenticated=True,
+        )
+        try:
+            self._raise_for_status(response, not_found=not_found)
+            item = response.json()
+        finally:
+            response.close()
+        self._validate_item_boundary(item)
+        return item
+
     def _get_drive_item_from_url(
         self, url: str, *, not_found: type[SPNotFoundError] = SPNotFoundError
     ) -> dict[str, Any]:
         self._validate_sharepoint_url(url)
+        drive_url_name = getattr(self, "_drive_url_name", None) or getattr(
+            self, "document_folder_name", ""
+        )
+        relative_path = sharepoint_location_path(
+            url,
+            self.url,
+            drive_url_name,
+        )
+        if relative_path is not None:
+            return self._get_drive_item_from_path(relative_path, not_found=not_found)
         encoded_url = share_id(url)
         response = self._request(
             "GET",
@@ -1193,6 +1234,9 @@ class SharepointManager(SharepointManagerBase):
             for d in self._paginate(f"{self._graph_base_url}/sites/{site_id}/drives"):
                 if d.get("name") == self.document_folder_name:
                     self._drive_id = d["id"]
+                    self._drive_url_name = self._drive_name_from_web_url(
+                        d, self.document_folder_name
+                    )
                     return self._drive_id
             raise SPDriveNotFound(
                 "Requested document library was not found", status=404
@@ -1206,9 +1250,18 @@ class SharepointManager(SharepointManagerBase):
             timeout=30,
         )
         self._raise_for_status(r, not_found=SPDriveNotFound)
-        self._drive_id = r.json()["id"]
-        self.document_folder_name = unquote(r.json()["webUrl"].split("/")[-1])
+        drive = r.json()
+        self._drive_id = drive["id"]
+        self.document_folder_name = unquote(drive["webUrl"].split("/")[-1])
+        self._drive_url_name = self.document_folder_name
         return self._drive_id
+
+    @staticmethod
+    def _drive_name_from_web_url(drive: dict[str, Any], fallback: str) -> str:
+        web_url = drive.get("webUrl")
+        if isinstance(web_url, str) and web_url:
+            return unquote(web_url.rstrip("/").split("/")[-1])
+        return fallback
 
     def _get_folder(self, folder_path: str) -> SPFolder:
         """Resolve a folder under the current drive by its relative path."""
@@ -1359,6 +1412,15 @@ class SharepointManager(SharepointManagerBase):
             self._raise_for_status(response)
             for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
                 if chunk:
+                    policy = getattr(self, "policy", OperationPolicy())
+                    if (
+                        downloaded_bytes + len(chunk) > int(file_obj.size)
+                        or downloaded_bytes + len(chunk) > policy.max_file_bytes
+                        or downloaded_bytes + len(chunk) > policy.max_total_bytes
+                    ):
+                        raise SPValidationError(
+                            "Downloaded content exceeded its budget"
+                        )
                     output.write(chunk)
                     digest.update(chunk)
                     downloaded_bytes += len(chunk)

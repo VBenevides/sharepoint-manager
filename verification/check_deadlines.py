@@ -30,6 +30,9 @@ class Response:
     def raise_for_status(self):
         raise requests.HTTPError("private details")
 
+    def json(self):
+        return {"error": {"message": "Sharing link no longer available"}}
+
     def close(self):
         return None
 
@@ -51,6 +54,7 @@ def main() -> None:
             assert not exc.retryable
             assert isinstance(exc.cause, requests.HTTPError)
             assert "private details" not in str(exc)
+            assert "Sharing link no longer available" in str(exc)
         else:
             raise AssertionError("missing resource was not mapped")
 
@@ -74,6 +78,10 @@ def main() -> None:
     url_manager = object.__new__(SharepointManager)
     url_manager.graph_host = "graph.microsoft.com"
     url_manager._graph_base_url = "https://graph.microsoft.com/v1.0"
+    url_manager.url = "https://tenant.sharepoint.com/sites/demo"
+    url_manager._site_id = "site"
+    url_manager._drive_id = "drive"
+    url_manager._drive_url_name = "Documents"
     url_manager._hdr = lambda: {"Authorization": "Bearer token"}
     url_manager._request = lambda method, url, **kwargs: Response()
     share_url = "https://tenant.sharepoint.com/sites/demo/Documents/missing"

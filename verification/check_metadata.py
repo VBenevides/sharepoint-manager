@@ -12,16 +12,16 @@ def main() -> None:
     assert re.search(r'requires-python = ">=3\.10"', pyproject)
     assert all(
         dependency in pyproject
-        for dependency in ("httpx>=0.27,<1", "msal>=1.35,<2", "requests>=2.33,<3")
+        for dependency in ("httpx>=0.27,<1", "msal>=1.37,<2", "requests>=2.33,<3")
     )
     assert 'build-backend = "setuptools.build_meta"' in pyproject
+    assert pyproject.count('"setuptools>=83.0.0"') == 2
     assert not (root / "setup.py").exists()
     assert '"build==1.3.0"' in pyproject
     assert '"ruff==0.12.10"' in pyproject
     assert not (root / "requirements.txt").exists()
     assert not (root / "requirements-build.txt").exists()
     assert "VERSION" in init
-    assert version == "0.1.0"
 
     code = """
 import importlib.metadata
@@ -37,10 +37,10 @@ msal.PublicClientApplication = type("Public", (), {})
 sys.modules["msal"] = msal
 sys.path.insert(0, ".")
 import sharepoint_manager
-assert sharepoint_manager.__version__ == "0.1.0"
+assert sharepoint_manager.__version__ == sys.argv[1]
 """
     subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", code, version],
         cwd=root,
         check=True,
         capture_output=True,

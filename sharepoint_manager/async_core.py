@@ -13,9 +13,10 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
-from .core import SharepointManagerBase
+from .core import _DIRECT_UPLOAD_MAX_BYTES, SharepointManagerBase
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
@@ -35,14 +36,23 @@ from .exceptions import (
     SPGraphError,
     SPNotFoundError,
     SPThrottledError,
+    SPUnauthorizedTarget,
     SPValidationError,
 )
-from .urls import GRAPH_HOSTS, share_id, validate_capability_url, validate_graph_url
+from .urls import (
+    GRAPH_HOSTS,
+    safe_graph_error_detail,
+    share_id,
+    sharepoint_location_path,
+    validate_capability_url,
+    validate_graph_url,
+)
 from .utils import QuickXorHash, safe_join
 
 _CHUNK_SIZE = 20 * 327680
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
+_RETRY_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT"})
 logger = logging.getLogger(__name__)
 
 
@@ -85,12 +95,16 @@ class AsyncSharepointManager:
         self._client = client
         self._owns_client = client is None
         self._token_lock = asyncio.Lock()
+        self._boundary_lock = asyncio.Lock()
         self._request_gate = asyncio.Semaphore(self.policy.max_concurrency)
         self._closed = False
         self._cached_token = ""
         self._cached_token_expiry = 0
         self._msal_client: Any | None = None
         self._account: Any | None = None
+        self._site_id: str | None = None
+        self._drive_id: str | None = None
+        self._drive_url_name: str | None = None
         self._user_credentials = isinstance(credentials, UserDelegatedCredential)
         self._username = credentials.username if self._user_credentials else None
         self._password: str | None = (
@@ -280,6 +294,16 @@ class AsyncSharepointManager:
                 )
             return response
 
+    @staticmethod
+    async def _close_response(response: Any) -> None:
+        close = getattr(response, "aclose", None)
+        if close is None:
+            close = getattr(response, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
     async def _retry_request(self, method: str, url: str, **kwargs: Any) -> Any:
         deadline = time.monotonic() + self.policy.wall_clock_seconds
         for attempt in range(self.policy.max_retry_attempts):
@@ -288,13 +312,23 @@ class AsyncSharepointManager:
                 raise SPDeadlineExceeded(
                     "Graph request deadline exceeded", retryable=True
                 )
-            response = await self._request(method, url, **kwargs)
+            request_kwargs = dict(kwargs)
+            request_kwargs["timeout"] = min(
+                float(request_kwargs.get("timeout", remaining)), remaining
+            )
+            try:
+                response = await asyncio.wait_for(
+                    self._request(method, url, **request_kwargs), remaining
+                )
+            except asyncio.TimeoutError as exc:
+                raise SPDeadlineExceeded(
+                    "Graph request deadline exceeded", retryable=True
+                ) from exc
             if time.monotonic() >= deadline:
                 request_id = response.headers.get("request-id") or response.headers.get(
                     "client-request-id"
                 )
-                if hasattr(response, "aclose"):
-                    await response.aclose()
+                await self._close_response(response)
                 raise SPDeadlineExceeded(
                     "Graph request deadline exceeded",
                     status=getattr(response, "status_code", None),
@@ -302,18 +336,31 @@ class AsyncSharepointManager:
                     retryable=True,
                 )
             if (
-                response.status_code not in _RETRY_STATUSES
+                method.upper() not in _RETRY_METHODS
+                or response.status_code not in _RETRY_STATUSES
                 or attempt + 1 >= self.policy.max_retry_attempts
             ):
                 return response
-            delay = min(2**attempt, self.policy.max_retry_after_seconds, remaining)
+            retry_after = response.headers.get("Retry-After")
+            try:
+                retry_after_seconds = float(retry_after)
+            except (TypeError, ValueError):
+                retry_after_seconds = 2**attempt
+            remaining = deadline - time.monotonic()
+            delay = min(
+                max(0.0, retry_after_seconds),
+                self.policy.max_retry_after_seconds,
+                max(0.0, remaining),
+            )
             if delay >= remaining:
+                await self._close_response(response)
                 raise SPDeadlineExceeded(
                     "Graph request deadline exceeded",
                     status=response.status_code,
                     request_id=response.headers.get("request-id"),
                     retryable=True,
                 )
+            await self._close_response(response)
             await asyncio.sleep(delay)
         raise SPGraphError("Request retry budget exhausted")
 
@@ -355,6 +402,9 @@ class AsyncSharepointManager:
         request_id = response.headers.get("request-id") or response.headers.get(
             "client-request-id"
         )
+        detail = safe_graph_error_detail(response)
+        if detail:
+            message = f"{message}: {detail}"
         raise error_type(
             message,
             status=status,
@@ -366,39 +416,123 @@ class AsyncSharepointManager:
     def _share_id(url: str) -> str:
         return share_id(url)
 
+    async def _ensure_boundary(self) -> None:
+        if self._site_id and self._drive_id:
+            return
+        async with self._boundary_lock:
+            if self._site_id and self._drive_id:
+                return
+            parsed = urlsplit(self.sharepoint_site_url)
+            site_path = quote(parsed.path.rstrip("/"), safe="/")
+            response = await self._retry_request(
+                "GET",
+                f"{self._graph_base_url}/sites/{parsed.hostname}:{site_path}",
+            )
+            self._raise_for_status(response, not_found=SPFolderNotFound)
+            site_id = response.json().get("id")
+            if not site_id:
+                raise SPUnauthorizedTarget("Configured SharePoint site has no ID")
+            response = await self._retry_request(
+                "GET", f"{self._graph_base_url}/sites/{site_id}/drive"
+            )
+            self._raise_for_status(response, not_found=SPFolderNotFound)
+            drive = response.json()
+            drive_id = drive.get("id")
+            if not drive_id:
+                raise SPUnauthorizedTarget("Configured SharePoint drive has no ID")
+            self._site_id = site_id
+            self._drive_id = drive_id
+            web_url = drive.get("webUrl")
+            if isinstance(web_url, str) and web_url:
+                self._drive_url_name = unquote(
+                    urlsplit(web_url).path.rstrip("/").split("/")[-1]
+                )
+            else:
+                self._drive_url_name = str(drive.get("name", ""))
+
+    def _validate_boundary(self, item: dict[str, Any]) -> None:
+        SharepointManagerBase._validate_item_boundary(self, item)
+
     async def _get_item_from_url(
         self, url: str, *, not_found: type[SPNotFoundError] = SPNotFoundError
     ) -> dict[str, Any]:
         SharepointManagerBase._validate_sharepoint_url(url)
+        await self._ensure_boundary()
+        relative_path = sharepoint_location_path(
+            url,
+            self.sharepoint_site_url,
+            self._drive_url_name or "",
+        )
+        if relative_path is not None:
+            endpoint = f"{self._graph_base_url}/drives/{self._drive_id}/root"
+            if relative_path:
+                endpoint += f":/{quote(relative_path, safe='/')}"
+            response = await self._retry_request("GET", endpoint)
+            try:
+                self._raise_for_status(response, not_found=not_found)
+                item = response.json()
+            finally:
+                await self._close_response(response)
+            self._validate_boundary(item)
+            return item
         response = await self._retry_request(
             "GET",
             f"https://{self.graph_host}/v1.0/shares/{self._share_id(url)}/driveItem",
         )
-        self._raise_for_status(response, not_found=not_found)
-        return response.json()
+        try:
+            self._raise_for_status(response, not_found=not_found)
+            item = response.json()
+        finally:
+            await self._close_response(response)
+        self._validate_boundary(item)
+        return item
 
     async def _children(
         self, folder: SPFolder, budget: dict[str, Any] | None = None
     ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
-        if budget is not None:
-            self._consume_budget(budget, pages=1)
+        budget = budget or {
+            "bytes": 0,
+            "items": 0,
+            "pages": 0,
+            "started": time.monotonic(),
+        }
         drive_id = folder.parent_reference.get("driveId")
         if not drive_id:
             raise SPValidationError("Folder has no trusted drive reference")
-        response = await self._retry_request(
-            "GET",
-            f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}/children",
-        )
-        self._raise_for_status(response, not_found=SPFolderNotFound)
         files: dict[str, SPFile] = {}
         folders: dict[str, SPFolder] = {}
-        for item in response.json().get("value", []):
-            if "file" in item:
-                file = SPFile.from_dict(item)
-                files[file.name] = file
-            elif "folder" in item:
-                child = SPFolder.from_dict(item)
-                folders[child.name] = child
+        next_url: str | None = (
+            f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}/children"
+        )
+        seen: set[str] = set()
+        item_count = 0
+        while next_url:
+            if not isinstance(next_url, str) or next_url in seen:
+                raise SPValidationError("Invalid or repeated Graph pagination link")
+            seen.add(next_url)
+            self._consume_budget(budget, pages=1)
+            self._validate_graph_url(next_url)
+            response = await self._retry_request("GET", next_url)
+            try:
+                self._raise_for_status(response, not_found=SPFolderNotFound)
+                data = response.json()
+            finally:
+                await self._close_response(response)
+            values = data.get("value", [])
+            item_count += len(values)
+            if item_count > self.policy.max_items:
+                raise SPValidationError("Graph item budget exceeded")
+            for item in values:
+                self._validate_boundary(item)
+                if "file" in item:
+                    file = SPFile.from_dict(item)
+                    files[file.name] = file
+                elif "folder" in item:
+                    child = SPFolder.from_dict(item)
+                    folders[child.name] = child
+            next_url = data.get("@odata.nextLink")
+            if next_url is not None and not isinstance(next_url, str):
+                raise SPValidationError("Invalid Graph pagination link")
         return files, folders
 
     def _consume_budget(
@@ -428,7 +562,11 @@ class AsyncSharepointManager:
         self, item: SPFile, destination: str, budget: dict[str, Any]
     ) -> None:
         self._validate_capability_url(item.download_url)
-        if int(item.size) > self.policy.max_file_bytes:
+        if int(item.size) > min(
+            self.policy.max_file_bytes,
+            self.policy.max_total_bytes,
+            self.policy.max_disk_bytes,
+        ):
             raise SPValidationError("File exceeds the configured transfer budget")
         directory = os.path.dirname(destination) or "."
         fd, temporary = tempfile.mkstemp(prefix=".sp-async-download-", dir=directory)
@@ -437,24 +575,36 @@ class AsyncSharepointManager:
         try:
             client = await self._get_client()
             if hasattr(client, "stream"):
-                response_context = client.stream("GET", item.download_url)
-                async with response_context as response:
-                    self._raise_for_status(response)
-                    chunks: AsyncIterator[bytes] = response.aiter_bytes(
-                        _DOWNLOAD_CHUNK_SIZE
-                    )
-                    with os.fdopen(fd, "wb") as output:
-                        async for chunk in chunks:
-                            await self._consume_chunk(output, chunk, digest, budget)
-                            downloaded += len(chunk)
+                async with self._request_gate:
+                    response_context = client.stream("GET", item.download_url)
+                    async with response_context as response:
+                        self._raise_for_status(response)
+                        chunks: AsyncIterator[bytes] = response.aiter_bytes(
+                            _DOWNLOAD_CHUNK_SIZE
+                        )
+                        with os.fdopen(fd, "wb") as output:
+                            fd = None
+                            async for chunk in chunks:
+                                await self._consume_chunk(
+                                    output,
+                                    chunk,
+                                    digest,
+                                    budget,
+                                    downloaded,
+                                    int(item.size),
+                                )
+                                downloaded += len(chunk)
             else:
                 response = await self._request(
                     "GET", item.download_url, authenticated=False
                 )
                 self._raise_for_status(response)
                 with os.fdopen(fd, "wb") as output:
+                    fd = None
                     chunk = response.content
-                    await self._consume_chunk(output, chunk, digest, budget)
+                    await self._consume_chunk(
+                        output, chunk, digest, budget, downloaded, int(item.size)
+                    )
                     downloaded = len(chunk)
             if downloaded != int(item.size):
                 raise SPValidationError("Downloaded content was incomplete")
@@ -464,16 +614,31 @@ class AsyncSharepointManager:
                 )
             os.replace(temporary, destination)
         finally:
+            if fd is not None:
+                os.close(fd)
             try:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
 
     async def _consume_chunk(
-        self, output: Any, chunk: bytes, digest: QuickXorHash, budget: dict[str, Any]
+        self,
+        output: Any,
+        chunk: bytes,
+        digest: QuickXorHash,
+        budget: dict[str, Any],
+        downloaded: int = 0,
+        declared_size: int | None = None,
     ) -> None:
         if not chunk:
             return
+        next_size = downloaded + len(chunk)
+        if declared_size is not None and next_size > declared_size:
+            raise SPValidationError("Downloaded content exceeded its declared size")
+        if next_size > self.policy.max_file_bytes:
+            raise SPValidationError("Downloaded content exceeded its file budget")
+        if budget["bytes"] + len(chunk) > self.policy.max_total_bytes:
+            raise SPValidationError("Transfer byte budget exceeded")
         self._consume_budget(budget, byte_count=len(chunk))
         output.write(chunk)
         digest.update(chunk)
@@ -508,7 +673,9 @@ class AsyncSharepointManager:
             },
         )
         self._raise_for_status(response)
-        return SPFolder.from_dict(response.json())
+        payload = response.json()
+        self._validate_boundary(payload)
+        return SPFolder.from_dict(payload)
 
     async def _upload_file(
         self,
@@ -525,6 +692,28 @@ class AsyncSharepointManager:
         if budget is not None:
             self._consume_budget(budget, byte_count=size, items=1)
         drive_id = folder.parent_reference.get("driveId")
+        if size <= _DIRECT_UPLOAD_MAX_BYTES:
+            url = (
+                f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}:"
+                f"/{quote(path.name, safe='')}:/content"
+            )
+            response = await self._retry_request(
+                "PUT",
+                url,
+                headers={"Content-Length": str(size)},
+                params={"@microsoft.graph.conflictBehavior": "replace"},
+                content=path.read_bytes(),
+            )
+            try:
+                self._raise_for_status(response)
+                payload = response.json()
+            finally:
+                await self._close_response(response)
+            return (
+                SPFile.from_dict(payload)
+                if payload.get("id")
+                else SPFile(id="", name=path.name, size=size)
+            )
         session_response = await self._retry_request(
             "POST",
             f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}:/{path.name}:/createUploadSession",
@@ -538,7 +727,7 @@ class AsyncSharepointManager:
         with path.open("rb") as source:  # noqa: ASYNC230
             while chunk := source.read(_CHUNK_SIZE):
                 end = offset + len(chunk) - 1
-                response = await self._request(
+                response = await self._retry_request(
                     "PUT",
                     upload_url,
                     authenticated=False,

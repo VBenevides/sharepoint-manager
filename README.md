@@ -15,7 +15,7 @@ intentional breaking release from 0.0.x; see the [0.1.x contract](docs/contract-
 ## Support contract
 
 - Python: 3.10–3.14
-- Runtime dependencies: `httpx>=0.27,<1`, `msal>=1.35,<2`, and `requests>=2.33,<3`
+- Runtime dependencies: `httpx>=0.27,<1`, `msal>=1.37,<2`, and `requests>=2.33,<3`
 - API: explicit operation targets, bounded by `OperationPolicy`, and typed with `SP*` exceptions
 - Authentication: confidential app registration credentials or an explicitly
   configured service-account username/password flow
@@ -101,9 +101,9 @@ or another provider, inject a `TokenProvider` with `get_token(scope)`.
 - `iter_collection()` yields bounded `SPCollectionPage` values lazily.
   `iter_folder_delta()` yields `SPDeltaPage` values containing files, folders,
   tombstones, and checkpoint links. Persist `delta_link` in the caller's store.
-- Approved SharePoint URLs support folder metadata, listing, creation, empty
-  deletion, normalized permissions, and file transfers. Site/drive boundaries
-  are checked before operations.
+- Approved SharePoint browser location URLs and sharing links support folder
+  metadata, listing, creation, empty deletion, normalized permissions, and file
+  transfers. Site/drive boundaries are checked before operations.
 
 ## Limits, retries, and errors
 

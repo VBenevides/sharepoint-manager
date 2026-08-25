@@ -1,6 +1,37 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.1] - 2026-08-25
+
+### Features
+
+- Added direct Graph content uploads for small files while retaining resumable
+  sessions for larger files.
+
+### Bugfixes
+
+- Enforced configured site and drive boundaries for async URL operations.
+- Accepted SharePoint browser location URLs as well as sharing links for URL
+  operations, including composite Graph site IDs.
+- Preserved safe stale-sharing-link details in Graph errors.
+- Capped streamed download bytes before writing oversized responses.
+- Corrected retry behavior for non-idempotent requests and resumable uploads.
+- Bounded recursive pagination and closed discarded responses.
+- Closed temporary download descriptors on setup failures.
+- Kept streaming downloads within the configured concurrency limit.
+
+### Others
+
+- Added a local async transfer-lag benchmark with explicit network-measurement
+  limitations.
+- Added minimum-profile dependency auditing.
+
+### Breaking Changes
+
+- Raised the minimum supported MSAL version to 1.37.
+- Async URL operations now reject resources outside the configured site/drive
+  boundary.
+
+## [Project / Repository] - 2026-08-24
 
 - Removed the scheduled live-tenant staging workflow and smoke harness while
   retaining the protected release checks.

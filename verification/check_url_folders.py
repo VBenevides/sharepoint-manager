@@ -39,6 +39,8 @@ def main() -> None:
     manager._graph_base_url = "https://graph.microsoft.com/v1.0"
     manager._site_id = "site-a"
     manager._drive_id = "drive-a"
+    manager.url = "https://tenant.sharepoint.com/sites/site"
+    manager._drive_url_name = "Shared Documents"
     manager.policy = types.SimpleNamespace(
         max_pages=3, max_items=10, wall_clock_seconds=60
     )
@@ -56,7 +58,7 @@ def main() -> None:
 
     def request(method, url, **kwargs):
         calls.append((method, url, kwargs))
-        if "/shares/" in url:
+        if "/shares/" in url or "/drives/drive-a/root:/" in url:
             return Response(folder)
         if method == "GET" and url.endswith("/children"):
             next_url = manager._graph_base_url + "/v1.0/children?p=2"
@@ -96,6 +98,11 @@ def main() -> None:
     manager._request = request
     metadata = manager.get_folder_metadata_from_url(share_url)
     assert metadata.id == "folder-a"
+    sharing_url = "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc"
+    assert manager.get_folder_metadata_from_url(sharing_url).id == "folder-a"
+    redirect_url = "https://tenant.sharepoint.com/:f:/r/sites/site/Shared%20Documents/Folder%20%231"
+    assert manager.get_folder_metadata_from_url(redirect_url).id == "folder-a"
+    assert any("/drives/drive-a/root:/Folder%20%231" in url for _, url, _ in calls)
     files, folders = manager.list_folder_from_url(share_url)
     assert set(files) == {"a.txt"} and set(folders) == {"Sub"}
     created = manager.create_folder_from_url(share_url, "New #1")
@@ -113,7 +120,7 @@ def main() -> None:
 
     manager._request = lambda method, url, **kwargs: (
         Response(folder)
-        if "/shares/" in url
+        if "/shares/" in url or "/drives/drive-a/root:/" in url
         else Response({"value": [{"id": "file-a", "name": "a.txt", "file": {}}]})
     )
     try:
@@ -126,7 +133,7 @@ def main() -> None:
     deleted = []
 
     def delete_request(method, url, **kwargs):
-        if "/shares/" in url:
+        if "/shares/" in url or "/drives/drive-a/root:/" in url:
             return Response(folder)
         if url.endswith("/children"):
             return Response({"value": []})
@@ -140,7 +147,7 @@ def main() -> None:
     child_lists = []
 
     def force_delete_request(method, url, **kwargs):
-        if "/shares/" in url:
+        if "/shares/" in url or "/drives/drive-a/root:/" in url:
             return Response(folder)
         if url.endswith("/children"):
             child_lists.append(url)

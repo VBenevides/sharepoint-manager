@@ -27,7 +27,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install ".[dev]"
           if [ "${{ matrix.dependencies }}" = minimum ]; then
-            python -m pip install --force-reinstall "httpx==0.27.0" "msal==1.35.0" "requests==2.33.0"
+            python -m pip install --force-reinstall "httpx==0.27.0" "msal==1.37.0" "requests==2.33.0"
           fi
       - name: Compile and run focused checks
         run: |
@@ -35,6 +35,9 @@ jobs:
           python -m unittest discover -s tests -v
       - name: Dependency consistency
         run: python -m pip check
+      - name: Audit minimum dependencies
+        if: matrix.dependencies == 'minimum'
+        run: pip-audit --progress-spinner off
 
   static:
     name: Static checks
