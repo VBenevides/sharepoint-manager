@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
-from .core import SharepointManagerBase
+from .core import _DIRECT_UPLOAD_MAX_BYTES, SharepointManagerBase
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
@@ -653,6 +653,28 @@ class AsyncSharepointManager:
         if budget is not None:
             self._consume_budget(budget, byte_count=size, items=1)
         drive_id = folder.parent_reference.get("driveId")
+        if size <= _DIRECT_UPLOAD_MAX_BYTES:
+            url = (
+                f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}:"
+                f"/{quote(path.name, safe='')}:/content"
+            )
+            response = await self._retry_request(
+                "PUT",
+                url,
+                headers={"Content-Length": str(size)},
+                params={"@microsoft.graph.conflictBehavior": "replace"},
+                content=path.read_bytes(),
+            )
+            try:
+                self._raise_for_status(response)
+                payload = response.json()
+            finally:
+                await self._close_response(response)
+            return (
+                SPFile.from_dict(payload)
+                if payload.get("id")
+                else SPFile(id="", name=path.name, size=size)
+            )
         session_response = await self._retry_request(
             "POST",
             f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}:/{path.name}:/createUploadSession",

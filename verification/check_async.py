@@ -14,6 +14,7 @@ msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
 from sharepoint_manager import AsyncSharepointManager, OperationPolicy, async_core
+from sharepoint_manager.core import _DIRECT_UPLOAD_MAX_BYTES
 from sharepoint_manager.exceptions import (
     SPDeadlineExceeded,
     SPUnauthorizedTarget,
@@ -37,13 +38,18 @@ class Client:
         self.items = {}
         self.children = {}
         self.uploaded = {}
+        self.requests = []
+        self.request_latency = 0
         self.active = 0
         self.max_active = 0
 
     async def request(self, method, url, **kwargs):
+        self.requests.append((method, url))
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
+            if self.request_latency:
+                await asyncio.sleep(self.request_latency)
             if "/shares/" in url:
                 share_id = url.split("/shares/", 1)[1].split("/", 1)[0]
                 return Response(self.items[share_id])
@@ -64,6 +70,12 @@ class Client:
             if method == "POST" and url.endswith("createUploadSession"):
                 upload_url = "https://tenant.sharepoint.com/upload/session"
                 return Response({"uploadUrl": upload_url})
+            if method == "PUT" and url.endswith("/content"):
+                data = kwargs.get("content", b"")
+                self.uploaded[url] = data
+                return Response(
+                    {"id": "direct", "name": "direct.bin", "size": len(data)}
+                )
             if method == "PUT" and "/upload/" in url:
                 data = kwargs.get("content", b"")
                 self.uploaded[url] = self.uploaded.get(url, b"") + data
@@ -283,8 +295,61 @@ async def main() -> None:
 
         source = Path(directory) / "upload.bin"
         source.write_bytes(b"upload")
+        client.requests.clear()
         await manager.upload_file_to_folder_url(folder_url, str(source))
         assert b"upload" in b"".join(client.uploaded.values())
+
+        def upload_requests(fake_client):
+            return [
+                (method, url)
+                for method, url in fake_client.requests
+                if "createUploadSession" in url
+                or "/upload/" in url
+                or url.endswith("/content")
+            ]
+
+        assert len(upload_requests(client)) == 1
+        threshold = Path(directory) / "threshold.bin"
+        threshold.write_bytes(b"x" * _DIRECT_UPLOAD_MAX_BYTES)
+        client.requests.clear()
+        await manager.upload_file_to_folder_url(folder_url, str(threshold))
+        assert len(upload_requests(client)) == 1
+
+        large = Path(directory) / "large.bin"
+        large.write_bytes(b"x" * (_DIRECT_UPLOAD_MAX_BYTES + 1))
+        client.requests.clear()
+        await manager.upload_file_to_folder_url(folder_url, str(large))
+        assert len(upload_requests(client)) == 3
+
+        workload_client = Client()
+        workload_client.request_latency = 0.001
+        workload_manager = AsyncSharepointManager(
+            "https://tenant.sharepoint.com/sites/demo",
+            token_provider=Provider(),
+            policy=OperationPolicy(max_concurrency=100),
+            client=workload_client,
+        )
+        workload_manager._site_id = "site"
+        workload_manager._drive_id = "drive"
+        workload_client.items[workload_manager._share_id(folder_url)] = folder_payload
+        with tempfile.TemporaryDirectory() as workload_directory:
+            workload_files = []
+            for index in range(100):
+                workload_file = Path(workload_directory) / f"workload-{index}.bin"
+                workload_file.write_bytes(b"x")
+                workload_files.append(workload_file)
+            await asyncio.gather(
+                *(
+                    workload_manager.upload_file_to_folder_url(
+                        folder_url, str(workload_file)
+                    )
+                    for workload_file in workload_files
+                )
+            )
+        assert len(upload_requests(workload_client)) == 100
+        assert len(workload_client.requests) == 200
+        assert 200 * workload_client.request_latency < 300 * workload_client.request_latency
+        await workload_manager.close()
 
         await manager.download_folder_from_url(folder_url, directory)
         assert (Path(directory) / "folder" / "remote.bin").read_bytes() == b"payload"
