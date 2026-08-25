@@ -76,6 +76,27 @@ class AsyncSharepointManager:
         client: Any | None = None,
         telemetry: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
+        """Initialize an async manager for one SharePoint site.
+
+        Parameters
+        ----------
+        sharepoint_site_url : str
+            Approved SharePoint site URL.
+        credentials : ClientCredential or UserDelegatedCredential, optional
+            MSAL credential. Supply ``tenant_id`` with credential-based auth.
+        token_provider : TokenProvider, optional
+            Injected provider used instead of MSAL.
+        graph_host : str, default="graph.microsoft.com"
+            Approved Microsoft Graph host.
+        tenant_id : str, optional
+            Tenant name or GUID used in the MSAL authority.
+        policy : OperationPolicy, optional
+            Transfer budgets and retry limits.
+        client : object, optional
+            Injected async HTTP client for tests or custom transports.
+        telemetry : callable, optional
+            Best-effort event callback.
+        """
         SharepointManagerBase._validate_sharepoint_url(sharepoint_site_url)
         graph_host = graph_host.lower().rstrip(".")
         if graph_host not in GRAPH_HOSTS:
@@ -667,6 +688,20 @@ class AsyncSharepointManager:
         digest.update(chunk)
 
     async def download_file_from_url(self, url: str, destination: str) -> SPFile:
+        """Download one approved SharePoint file to an explicit path.
+
+        Parameters
+        ----------
+        url : str
+            SharePoint file URL.
+        destination : str
+            Destination filename. Parent directories are created as needed.
+
+        Returns
+        -------
+        SPFile
+            Downloaded file metadata.
+        """
         item = SPFile.from_dict(
             await self._get_item_from_url(url, not_found=SPFileNotFound)
         )
@@ -772,6 +807,20 @@ class AsyncSharepointManager:
     async def upload_file_to_folder_url(
         self, folder_url: str, local_path: str
     ) -> SPFile:
+        """Upload one local file below an approved folder URL.
+
+        Parameters
+        ----------
+        folder_url : str
+            Approved SharePoint folder URL.
+        local_path : str
+            Local regular-file path.
+
+        Returns
+        -------
+        SPFile
+            Uploaded file metadata.
+        """
         folder = SPFolder.from_dict(
             await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
         )
@@ -787,6 +836,15 @@ class AsyncSharepointManager:
         return result
 
     async def download_folder_from_url(self, folder_url: str, destination: str) -> None:
+        """Recursively download an approved folder to a local path.
+
+        Parameters
+        ----------
+        folder_url : str
+            Approved SharePoint folder URL.
+        destination : str
+            Local destination directory.
+        """
         folder = SPFolder.from_dict(
             await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
         )
@@ -813,6 +871,15 @@ class AsyncSharepointManager:
     async def upload_folder_to_folder_url(
         self, folder_url: str, local_path: str
     ) -> None:
+        """Recursively upload a local folder below a SharePoint folder.
+
+        Parameters
+        ----------
+        folder_url : str
+            Approved SharePoint destination folder URL.
+        local_path : str
+            Local regular-folder path.
+        """
         source = Path(local_path)
         if not source.is_dir() or source.is_symlink():
             raise SPValidationError("Upload source must be a regular folder")
@@ -840,6 +907,7 @@ class AsyncSharepointManager:
                 await self._upload_folder(child, entry, budget, depth + 1)
 
     async def close(self) -> None:
+        """Close the owned HTTP client and clear credential state."""
         if self._closed:
             return
         self._closed = True
