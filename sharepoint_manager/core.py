@@ -1079,86 +1079,16 @@ class SharepointManager(SharepointManagerBase):
             f"{self._graph_base_url}/drives/{drive_id}"
             f"/items/{item_id}/createUploadSession"
         )
-
-        # Optional: Conflict behavior (fail, replace, or rename)
-        body = {"item": {"@microsoft.graph.conflictBehavior": conflict_behavior}}
-
-        r = self._request(
-            "POST", session_url, headers=self._hdr(json_content=True), json=body
-        )
-        self._raise_for_status(r)
-        upload_url = r.json()["uploadUrl"]
-
-        # 3. Upload the file in chunks
-        # Chunk size must be a multiple of 327,680 bytes (320 KiB)
-        chunk_size = _UPLOAD_CHUNK_SIZE
-        last_log = 0.0
-        resp: requests.Response | None = None
-
-        try:
-            with open(local_file_path, "rb") as f:
-                start = 0
-                if file_size == 0:
-                    content_url = (
-                        session_url.removesuffix("/createUploadSession") + "/content"
-                    )
-                    resp = self._request(
-                        "PUT", content_url, headers=self._hdr(), data=b"", timeout=60
-                    )
-                    self._raise_for_status(resp)
-                while start < file_size:
-                    chunk = f.read(chunk_size)
-                    curr_chunk_len = len(chunk)
-                    end = start + curr_chunk_len - 1
-
-                    headers = {
-                        "Content-Range": f"bytes {start}-{end}/{file_size}",
-                        "Content-Length": str(curr_chunk_len),
-                    }
-
-                    resp = self._request(
-                        "PUT", upload_url, headers=headers, data=chunk, timeout=60
-                    )
-
-                    if resp.status_code not in (200, 201, 202):
-                        self._raise_for_status(resp)
-
-                    next_start = end + 1
-                    try:
-                        ranges = resp.json().get("nextExpectedRanges", [])
-                        if ranges:
-                            next_start = int(str(ranges[0]).split("-", 1)[0])
-                    except (AttributeError, TypeError, ValueError):
-                        pass
-                    if next_start < 0 or next_start > file_size:
-                        raise SPValidationError(
-                            "Graph returned an invalid upload offset"
-                        )
-                    if next_start != end + 1:
-                        f.seek(next_start)
-                    start = next_start
-                    now = time.monotonic()
-                    if (
-                        now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
-                        or start >= file_size
-                    ):
-                        logger.info("Uploaded %s/%s bytes...", start, file_size)
-                        last_log = now
-        except Exception:
-            # Best-effort cancel of the upload session if anything goes wrong.
-            try:
-                self._request("DELETE", upload_url, timeout=30)
-            except Exception:
-                pass
-            raise
-
-        logger.info("Upload complete.")
-        if resp is None:
-            raise SPAmbiguousWriteError(upload_url)
-        try:
-            return SPFile.from_dict(resp.json())
-        except (TypeError, KeyError, ValueError):
-            return file_obj
+        with open(local_file_path, "rb") as source:
+            return self._upload_source_resumable(
+                source,
+                file_obj.name,
+                None,
+                file_size,
+                conflict_behavior,
+                session_url=session_url,
+                fallback=file_obj,
+            )
 
     def upload_file_to_folder_url(
         self,
@@ -1731,17 +1661,23 @@ class SharepointManager(SharepointManagerBase):
         self,
         source: BinaryIO,
         file_name: str,
-        target_folder: SPFolder,
+        target_folder: SPFolder | None,
         file_size_b: int,
         conflict_behavior: Literal["fail", "replace", "rename"],
+        *,
+        session_url: str | None = None,
+        fallback: SPFile | None = None,
     ) -> SPFile:
-        encoded_name = quote_segment(file_name)
-        session_url = (
-            f"{self._graph_base_url}/sites/{self._site_id}/drives/{self._drive_id}"
-            f"/items/{target_folder.id}:/{encoded_name}:/createUploadSession"
-        )
+        if session_url is None:
+            if target_folder is None:
+                raise SPValidationError("Upload target folder is required")
+            encoded_name = quote_segment(file_name)
+            session_url = (
+                f"{self._graph_base_url}/sites/{self._site_id}/drives/{self._drive_id}"
+                f"/items/{target_folder.id}:/{encoded_name}:/createUploadSession"
+            )
         response: requests.Response | None = None
-        upload_url = session_url
+        upload_url: str | None = None
         start_byte = 0
         try:
             session = self._request(
@@ -1753,41 +1689,56 @@ class SharepointManager(SharepointManagerBase):
             )
             self._raise_for_status(session)
             upload_url = str(session.json()["uploadUrl"])
-            while start_byte < file_size_b:
-                chunk = source.read(min(_UPLOAD_CHUNK_SIZE, file_size_b - start_byte))
-                if not chunk:
-                    raise SPValidationError(
-                        "Upload source ended before its declared size"
-                    )
-                end_byte = start_byte + len(chunk) - 1
+            if file_size_b == 0:
                 response = self._request(
                     "PUT",
-                    upload_url,
-                    headers={
-                        "Content-Length": str(len(chunk)),
-                        "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size_b}",
-                    },
+                    session_url.removesuffix("/createUploadSession") + "/content",
+                    headers=self._hdr(),
                     timeout=60,
-                    data=chunk,
+                    data=b"",
                 )
                 self._raise_for_status(response)
-                next_start = end_byte + 1
-                try:
-                    ranges = response.json().get("nextExpectedRanges", [])
-                    if ranges:
-                        next_start = int(str(ranges[0]).split("-", 1)[0])
-                except (AttributeError, TypeError, ValueError):
-                    pass
-                if next_start < 0 or next_start > file_size_b:
-                    raise SPValidationError("Graph returned an invalid upload offset")
-                if next_start != end_byte + 1:
-                    source.seek(next_start)
-                start_byte = next_start
+            else:
+                while start_byte < file_size_b:
+                    chunk = source.read(
+                        min(_UPLOAD_CHUNK_SIZE, file_size_b - start_byte)
+                    )
+                    if not chunk:
+                        raise SPValidationError(
+                            "Upload source ended before its declared size"
+                        )
+                    end_byte = start_byte + len(chunk) - 1
+                    response = self._request(
+                        "PUT",
+                        upload_url,
+                        headers={
+                            "Content-Length": str(len(chunk)),
+                            "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size_b}",
+                        },
+                        timeout=60,
+                        data=chunk,
+                    )
+                    self._raise_for_status(response)
+                    next_start = end_byte + 1
+                    try:
+                        ranges = response.json().get("nextExpectedRanges", [])
+                        if ranges:
+                            next_start = int(str(ranges[0]).split("-", 1)[0])
+                    except (AttributeError, TypeError, ValueError):
+                        pass
+                    if next_start < 0 or next_start > file_size_b:
+                        raise SPValidationError(
+                            "Graph returned an invalid upload offset"
+                        )
+                    if next_start != end_byte + 1:
+                        source.seek(next_start)
+                    start_byte = next_start
         except Exception as exc:
-            try:
-                self._request("DELETE", upload_url, timeout=30)
-            except Exception:
-                pass
+            if upload_url is not None:
+                try:
+                    self._request("DELETE", upload_url, timeout=30)
+                except Exception:
+                    pass
             self._emit_telemetry(
                 "transfer",
                 operation="upload",
@@ -1798,13 +1749,18 @@ class SharepointManager(SharepointManagerBase):
                 partial=start_byte > 0,
                 failure_class=type(exc).__name__,
             )
-            raise SPAmbiguousWriteError(upload_url, exc) from exc
+            raise SPAmbiguousWriteError(upload_url or session_url, exc) from exc
         if response is None:
-            raise SPAmbiguousWriteError(upload_url)
+            raise SPAmbiguousWriteError(upload_url or session_url)
         try:
             result = SPFile.from_dict(response.json())
         except (TypeError, KeyError, ValueError):
-            result = self._get_file(file_name, target_folder)
+            if fallback is not None:
+                result = fallback
+            elif target_folder is not None:
+                result = self._get_file(file_name, target_folder)
+            else:
+                raise SPAmbiguousWriteError(upload_url or session_url)
         self._emit_telemetry(
             "transfer",
             operation="upload",
@@ -1879,123 +1835,14 @@ class SharepointManager(SharepointManagerBase):
             )
 
         logger.info("Uploading file (%.1f MB)", file_size_mb)
-
         with open(local_file_path, "rb") as file:
-            site_id = self._site_id
-            drive_id = self._drive_id
-            folder_id = target_folder.id
-            encoded_name = quote_segment(file_name)
-            url = (
-                f"{self._graph_base_url}/sites/{site_id}/drives/{drive_id}"
-                f"/items/{folder_id}:/{encoded_name}:/createUploadSession"
+            return self._upload_source_resumable(
+                file,
+                file_name,
+                target_folder,
+                file_size_b,
+                conflict_behavior,
             )
-            request_body = {
-                "item": {"@microsoft.graph.conflictBehavior": conflict_behavior}
-            }
-            r = self._request(
-                "POST",
-                url,
-                headers=self._hdr(json_content=True),
-                timeout=30,
-                json=request_body,
-            )
-            self._raise_for_status(r)
-            upload_session = r.json()
-            upload_url = str(upload_session["uploadUrl"])
-
-            chunk_size = _UPLOAD_CHUNK_SIZE
-            start_byte = 0
-            last_log = 0.0
-            response: requests.Response | None = None
-            try:
-                if file_size_b == 0:
-                    content_url = url.removesuffix("/createUploadSession") + "/content"
-                    response = self._request(
-                        "PUT", content_url, headers=self._hdr(), data=b"", timeout=60
-                    )
-                    self._raise_for_status(response)
-                while True:
-                    chunk = file.read(chunk_size)
-                    if not chunk:
-                        break
-
-                    end_byte = start_byte + len(chunk) - 1
-                    content_range = f"bytes {start_byte}-{end_byte}/{file_size_b}"
-
-                    chunk_headers = {
-                        "Content-Length": str(len(chunk)),
-                        "Content-Range": content_range,
-                    }
-
-                    response = self._request(
-                        "PUT",
-                        upload_url,
-                        headers=chunk_headers,
-                        timeout=60,
-                        data=chunk,
-                    )
-                    self._raise_for_status(response)
-
-                    next_start = start_byte + len(chunk)
-                    try:
-                        ranges = response.json().get("nextExpectedRanges", [])
-                        if ranges:
-                            next_start = int(str(ranges[0]).split("-", 1)[0])
-                    except (AttributeError, TypeError, ValueError):
-                        pass
-                    if next_start < 0 or next_start > file_size_b:
-                        raise SPValidationError(
-                            "Graph returned an invalid upload offset"
-                        )
-                    if next_start != start_byte + len(chunk):
-                        file.seek(next_start)
-                    start_byte = next_start
-                    now = time.monotonic()
-                    if (
-                        now - last_log >= _PROGRESS_LOG_INTERVAL_SEC
-                        or start_byte >= file_size_b
-                    ):
-                        logger.info(
-                            "Uploaded %.1f MiB out of %.1f",
-                            start_byte / (1024 * 1024),
-                            file_size_b / (1024 * 1024),
-                        )
-                        last_log = now
-            except Exception as exc:
-                # Cancel upload session on failure to free server-side state.
-                try:
-                    _ = self._request("DELETE", upload_url, timeout=30)
-                except Exception:
-                    pass
-                self._emit_telemetry(
-                    "transfer",
-                    operation="upload",
-                    bytes=start_byte,
-                    expected_bytes=file_size_b,
-                    items=1,
-                    outcome="failure",
-                    partial=start_byte > 0,
-                    failure_class=type(exc).__name__,
-                )
-                raise SPAmbiguousWriteError(upload_url, exc) from exc
-
-        logger.info("Upload completed.")
-        if response is None:
-            raise SPAmbiguousWriteError(upload_url)
-        try:
-            result = SPFile.from_dict(response.json())
-        except (TypeError, KeyError, ValueError):
-            result = self._get_file(file_name, target_folder)
-        self._emit_telemetry(
-            "transfer",
-            operation="upload",
-            bytes=file_size_b,
-            expected_bytes=file_size_b,
-            items=1,
-            outcome="success",
-            partial=False,
-        )
-        return result
 
     def upload_folder(
         self,

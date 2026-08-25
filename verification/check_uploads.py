@@ -1,3 +1,4 @@
+import inspect
 import sys
 import tempfile
 import types
@@ -45,6 +46,13 @@ def manager_for(responses):
 
 
 def main() -> None:
+    assert "_upload_source_resumable" in inspect.getsource(
+        SharepointManager.upload_file
+    )
+    assert "createUploadSession" not in inspect.getsource(SharepointManager.upload_file)
+    assert "_upload_source_resumable" in inspect.getsource(
+        SharepointManager.upload_file_to_url
+    )
     with tempfile.TemporaryDirectory() as directory:
         empty = Path(directory) / "empty.txt"
         empty.write_bytes(b"")
