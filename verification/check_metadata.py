@@ -15,6 +15,7 @@ def main() -> None:
         for dependency in ("httpx>=0.27,<1", "msal>=1.37,<2", "requests>=2.33,<3")
     )
     assert 'build-backend = "setuptools.build_meta"' in pyproject
+    assert pyproject.count('"setuptools>=83.0.0"') == 2
     assert not (root / "setup.py").exists()
     assert '"build==1.3.0"' in pyproject
     assert '"ruff==0.12.10"' in pyproject
