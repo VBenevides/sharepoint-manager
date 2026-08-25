@@ -870,6 +870,14 @@ class SharepointManager(SharepointManagerBase):
             self._normalize_permission(item) for item in self._paginate(permission_url)
         )
 
+    def get_file_permissions_from_url(self, url: str) -> tuple[dict[str, Any], ...]:
+        """Return normalized permissions for an approved SharePoint file URL."""
+        file = self.get_file_metadata_from_url(url)
+        permission_url = f"{self._graph_base_url}/drives/{self._drive_id}/items/{file.id}/permissions"
+        return tuple(
+            self._normalize_permission(item) for item in self._paginate(permission_url)
+        )
+
     @staticmethod
     def _normalize_permission(permission: dict[str, Any]) -> dict[str, Any]:
         principal = permission.get("grantedToV2") or permission.get("grantedTo") or {}
@@ -1051,6 +1059,34 @@ class SharepointManager(SharepointManagerBase):
             return SPFile.from_dict(resp.json())
         except (TypeError, KeyError, ValueError):
             return file_obj
+
+    def upload_file_to_folder_url(
+        self,
+        folder_url: str,
+        local_file_path: str,
+        conflict_behavior: Literal["fail", "replace", "rename"] = "replace",
+    ) -> SPFile:
+        """Upload a local file below an approved SharePoint folder URL."""
+        folder = self.get_folder_metadata_from_url(folder_url)
+        return self.upload_file(
+            local_file_path,
+            _folder=folder,
+            conflict_behavior=conflict_behavior,
+        )
+
+    def upload_folder_to_folder_url(
+        self, folder_url: str, local_folder_path: str
+    ) -> None:
+        """Recursively upload a local folder below an approved folder URL."""
+        folder = self.get_folder_metadata_from_url(folder_url)
+        self.upload_folder(local_folder_path, _folder=folder)
+
+    def download_folder_from_url(
+        self, folder_url: str, local_download_path: str
+    ) -> None:
+        """Recursively download an approved SharePoint folder URL."""
+        folder = self.get_folder_metadata_from_url(folder_url)
+        self.download_folder(local_download_path, _folder=folder)
 
     def _consume_delta(
         self, start_url: str

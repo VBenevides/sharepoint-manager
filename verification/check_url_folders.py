@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -9,6 +10,7 @@ msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
 from sharepoint_manager.core import SharepointManager
+from sharepoint_manager.dataclasses import SPFile, SPFolder
 from sharepoint_manager.exceptions import (
     SPFolderNotEmpty,
     SPUnauthorizedTarget,
@@ -100,6 +102,7 @@ def main() -> None:
     permissions = manager.get_folder_permissions_from_url(share_url)
     assert permissions[0]["granted_to"]["id"] == "user-a"
     assert permissions[0]["roles"] == ("read",)
+
     try:
         manager.create_folder_from_url(share_url, "bad/name")
     except SPValidationError:
@@ -142,6 +145,56 @@ def main() -> None:
         pass
     else:
         raise AssertionError("off-boundary folder accepted")
+
+    file_obj = SPFile(
+        id="file-a",
+        name="a.txt",
+        parent_reference={"siteId": "site-a", "driveId": "drive-a"},
+    )
+    manager.get_file_metadata_from_url = lambda url: file_obj
+    manager._request = lambda method, url, **kwargs: Response(
+        {
+            "value": [
+                {
+                    "id": "permission-a",
+                    "roles": ["read"],
+                    "grantedToV2": {"user": {"id": "user-a", "displayName": "A User"}},
+                }
+            ]
+        }
+    )
+    file_permissions = manager.get_file_permissions_from_url(share_url)
+    assert file_permissions[0]["granted_to"]["id"] == "user-a"
+
+    transfer_calls = []
+    manager.get_folder_metadata_from_url = lambda url: SPFolder(
+        id="folder-a",
+        name="Folder #1",
+        parent_reference={"siteId": "site-a", "driveId": "drive-a"},
+    )
+    manager.upload_file = lambda path, **kwargs: (
+        transfer_calls.append(("upload_file", path, kwargs)) or file_obj
+    )
+    manager.upload_folder = lambda path, **kwargs: transfer_calls.append(
+        ("upload_folder", path, kwargs)
+    )
+    manager.download_folder = lambda path, **kwargs: transfer_calls.append(
+        ("download_folder", path, kwargs)
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        local_file = Path(directory) / "a.txt"
+        local_file.write_bytes(b"data")
+        local_folder = Path(directory) / "tree"
+        local_folder.mkdir()
+        assert manager.upload_file_to_folder_url(share_url, str(local_file)) is file_obj
+        manager.upload_folder_to_folder_url(share_url, str(local_folder))
+        manager.download_folder_from_url(share_url, str(Path(directory) / "out"))
+    assert [call[0] for call in transfer_calls] == [
+        "upload_file",
+        "upload_folder",
+        "download_folder",
+    ]
+    assert all(call[2]["_folder"].id == "folder-a" for call in transfer_calls)
 
     assert len(calls) >= 6
 
