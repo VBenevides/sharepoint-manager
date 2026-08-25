@@ -6,7 +6,6 @@ Module used to interact with sharepoint sites using an approach similar to file 
 # Imports
 # ---------------------------------------------------------------------- #
 
-import base64
 import logging
 import os
 import re
@@ -59,6 +58,13 @@ from .utils import (
     quote_segment,
     safe_join,
 )
+from .urls import (
+    GRAPH_HOSTS,
+    share_id,
+    validate_capability_url,
+    validate_graph_url,
+    validate_sharepoint_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,25 +82,6 @@ _UPLOAD_CHUNK_SIZE = 20 * _GRAPH_CHUNK_UNIT
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 # GUID pattern used to extract a tenant id from authorization URIs.
 _GUID_RE = re.compile(r"/([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})")
-_GRAPH_HOSTS = {
-    "graph.microsoft.com",
-    "graph.microsoft.us",
-    "dod-graph.microsoft.us",
-    "graph.microsoft.de",
-    "microsoftgraph.chinacloudapi.cn",
-}
-_MICROSOFT_CAPABILITY_SUFFIXES = (
-    ".sharepoint.com",
-    ".sharepoint.us",
-    ".sharepoint.de",
-    ".sharepoint.cn",
-    ".sharepoint-mil.us",
-    ".sharepoint-df.com",
-    ".1drv.com",
-)
-_SHAREPOINT_SUFFIXES = tuple(
-    x for x in _MICROSOFT_CAPABILITY_SUFFIXES if x != ".1drv.com"
-)
 
 
 class SharepointManagerBase:
@@ -154,56 +141,14 @@ class SharepointManagerBase:
         return headers
 
     def _validate_graph_url(self, url: str) -> None:
-        parsed = urlparse(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.username
-            or parsed.password
-            or parsed.fragment
-            or parsed.hostname != self.graph_host
-            or parsed.port not in (None, 443)
-        ):
-            raise SPValidationError(
-                "Authenticated requests require the configured HTTPS Graph host"
-            )
+        validate_graph_url(url, self.graph_host)
 
     def _validate_capability_url(self, url: str) -> None:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        if (
-            parsed.scheme != "https"
-            or parsed.username
-            or parsed.password
-            or parsed.fragment
-            or parsed.port not in (None, 443)
-            or not (
-                host == self.graph_host
-                or any(
-                    host.endswith(suffix) for suffix in _MICROSOFT_CAPABILITY_SUFFIXES
-                )
-            )
-        ):
-            raise SPValidationError(
-                "Capability URLs must use an approved HTTPS Microsoft host"
-            )
+        validate_capability_url(url, self.graph_host)
 
     @staticmethod
     def _validate_sharepoint_url(url: str) -> Any:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        if (
-            parsed.scheme != "https"
-            or parsed.username
-            or parsed.password
-            or parsed.fragment
-            or parsed.port not in (None, 443)
-            or not any(host.endswith(suffix) for suffix in _SHAREPOINT_SUFFIXES)
-            or not ("/sites/" in parsed.path or "/teams/" in parsed.path)
-        ):
-            raise SPValidationError(
-                "SharePoint URLs must use an approved HTTPS site host"
-            )
-        return parsed
+        return validate_sharepoint_url(url)
 
     def _validate_item_boundary(self, item: dict[str, Any]) -> None:
         parent = item.get("parentReference")
@@ -706,7 +651,7 @@ class SharepointManager(SharepointManagerBase):
         if credentials is None and token_provider is None:
             raise ValueError("credentials or token_provider is required")
         self.graph_host = graph_host.lower().rstrip(".")
-        if self.graph_host not in _GRAPH_HOSTS:
+        if self.graph_host not in GRAPH_HOSTS:
             raise SPValidationError(
                 "graph_host must be an approved Microsoft Graph host"
             )
@@ -805,7 +750,7 @@ class SharepointManager(SharepointManagerBase):
 
     def _get_drive_item_from_url(self, url: str) -> dict[str, Any]:
         self._validate_sharepoint_url(url)
-        encoded_url = "u!" + base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+        encoded_url = share_id(url)
         response = self._request(
             "GET",
             f"{self._graph_base_url}/shares/{encoded_url}/driveItem",

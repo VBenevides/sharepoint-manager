@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import inspect
 import logging
 import os
@@ -13,7 +12,6 @@ import warnings
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 from uuid import uuid4
 
 from .core import SharepointManagerBase
@@ -36,16 +34,10 @@ from .exceptions import (
     SPThrottledError,
     SPValidationError,
 )
+from .urls import GRAPH_HOSTS, share_id, validate_capability_url, validate_graph_url
 from .utils import QuickXorHash, safe_join
 
 
-_GRAPH_HOSTS = {
-    "graph.microsoft.com",
-    "graph.microsoft.us",
-    "dod-graph.microsoft.us",
-    "graph.microsoft.de",
-    "microsoftgraph.chinacloudapi.cn",
-}
 _CHUNK_SIZE = 20 * 327680
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
@@ -73,7 +65,7 @@ class AsyncSharepointManager:
     ) -> None:
         SharepointManagerBase._validate_sharepoint_url(sharepoint_site_url)
         graph_host = graph_host.lower().rstrip(".")
-        if graph_host not in _GRAPH_HOSTS:
+        if graph_host not in GRAPH_HOSTS:
             raise SPValidationError(
                 "graph_host must be an approved Microsoft Graph host"
             )
@@ -116,33 +108,10 @@ class AsyncSharepointManager:
         return self._client
 
     def _validate_graph_url(self, url: str) -> None:
-        parsed = urlparse(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname != self.graph_host
-            or parsed.username
-            or parsed.password
-            or parsed.fragment
-            or parsed.port not in (None, 443)
-        ):
-            raise SPValidationError(
-                "Authenticated requests require the configured Graph host"
-            )
+        validate_graph_url(url, self.graph_host)
 
     def _validate_capability_url(self, url: str) -> None:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        if (
-            parsed.scheme != "https"
-            or parsed.username
-            or parsed.password
-            or parsed.fragment
-            or parsed.port not in (None, 443)
-            or not (host == self.graph_host or host.endswith(".sharepoint.com"))
-        ):
-            raise SPValidationError(
-                "Capability URLs must use an approved HTTPS Microsoft host"
-            )
+        validate_capability_url(url, self.graph_host)
 
     def _emit(self, event: str, **fields: Any) -> None:
         record = {
@@ -334,7 +303,7 @@ class AsyncSharepointManager:
 
     @staticmethod
     def _share_id(url: str) -> str:
-        return "u!" + base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+        return share_id(url)
 
     async def _get_item_from_url(self, url: str) -> dict[str, Any]:
         SharepointManagerBase._validate_sharepoint_url(url)
