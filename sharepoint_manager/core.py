@@ -2083,8 +2083,6 @@ class SharepointManager(SharepointManagerBase):
         local_download_path = os.path.abspath(local_download_path)
         self._check_depth(sp_relative_folder_path)
 
-        os.makedirs(local_download_path, exist_ok=True)
-
         if isinstance(file, str):
             target_folder = _folder or (
                 self._resolve_folder(sp_relative_folder_path)
@@ -2094,7 +2092,9 @@ class SharepointManager(SharepointManagerBase):
             file_obj = self._get_file(file, target_folder)
         else:
             file_obj = file
+            self._validate_file_boundary(file_obj)
 
+        os.makedirs(local_download_path, exist_ok=True)
         file_size_bytes = int(file_obj.size)
         self._check_file_budget(file_size_bytes, local_download_path, _budget=_budget)
         logger.info("Downloading file")
