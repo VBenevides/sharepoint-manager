@@ -14,6 +14,15 @@ from sharepoint_manager.exceptions import SPUnauthorizedTarget
 
 
 def main() -> None:
+    permissions_doc = (Path(__file__).parents[1] / "docs/permissions.md").read_text()
+    for required in (
+        "trusted automation",
+        "must fail closed",
+        "Lists.SelectedOperations.Selected",
+        "Files.SelectedOperations.Selected",
+    ):
+        assert required in permissions_doc, required
+
     manager = object.__new__(SharepointManager)
     manager._site_id = "site-a"
     manager._drive_id = "drive-a"
