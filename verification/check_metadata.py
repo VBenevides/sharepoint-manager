@@ -17,7 +17,7 @@ def main() -> None:
     assert 'build-backend = "setuptools.build_meta"' in pyproject
     assert pyproject.count('"setuptools>=83.0.0"') == 2
     assert not (root / "setup.py").exists()
-    assert '"build==1.3.0"' in pyproject
+    assert '"build==1.5.0"' in pyproject
     assert '"ruff==0.12.10"' in pyproject
     assert not (root / "requirements.txt").exists()
     assert not (root / "requirements-build.txt").exists()
