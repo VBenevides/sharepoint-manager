@@ -15,7 +15,7 @@ intentional breaking release from 0.0.x; see the [0.1.x contract](docs/contract-
 ## Support contract
 
 - Python: 3.10–3.14
-- Runtime dependencies: `httpx>=0.27,<1`, `msal>=1.35,<2`, and `requests>=2.33,<3`
+- Runtime dependencies: `httpx>=0.27,<1`, `msal>=1.37,<2`, and `requests>=2.33,<3`
 - API: explicit operation targets, bounded by `OperationPolicy`, and typed with `SP*` exceptions
 - Authentication: confidential app registration credentials or an explicitly
   configured service-account username/password flow
