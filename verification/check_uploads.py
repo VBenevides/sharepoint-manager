@@ -34,7 +34,9 @@ def manager_for(responses):
     manager._drive_id = "drive"
     manager._graph_base_url = "https://graph.microsoft.com/v1.0"
     manager.policy = OperationPolicy(
-        max_file_bytes=100, max_total_bytes=100, max_disk_bytes=100
+        max_file_bytes=10 * 1024 * 1024,
+        max_total_bytes=10 * 1024 * 1024,
+        max_disk_bytes=10 * 1024 * 1024,
     )
     manager._root_folder = SPFolder(id="folder", name="root")
     manager._hdr = lambda json_content=False: {"Authorization": "Bearer token"}
@@ -48,7 +50,6 @@ def main() -> None:
         empty.write_bytes(b"")
         manager = manager_for(
             [
-                Response(200, {"uploadUrl": "https://upload.sharepoint.com/session"}),
                 Response(201, {"id": "empty", "name": "empty.txt", "file": {}}),
             ]
         )
@@ -58,11 +59,7 @@ def main() -> None:
         data = Path(directory) / "data.txt"
         data.write_bytes(b"abc")
         calls = []
-        responses = [
-            Response(200, {"uploadUrl": "https://upload.sharepoint.com/session"}),
-            Response(202, {"nextExpectedRanges": ["0-3"]}),
-            Response(201, {"id": "data", "name": "data.txt", "file": {}}),
-        ]
+        responses = [Response(201, {"id": "data", "name": "data.txt", "file": {}})]
         manager = manager_for(responses)
         original_request = manager._request
         manager._request = lambda method, url, **kwargs: (
@@ -70,7 +67,21 @@ def main() -> None:
             or original_request(method, url, **kwargs)
         )
         assert manager.upload_file(str(data), _folder=manager._root_folder).id == "data"
-        assert [call[0] for call in calls] == ["POST", "PUT", "PUT"]
+        assert [call[0] for call in calls] == ["PUT"]
+
+        large = Path(directory) / "large.bin"
+        large_size = 7 * 1024 * 1024
+        large.write_bytes(b"x" * large_size)
+        manager = manager_for(
+            [
+                Response(200, {"uploadUrl": "https://upload.sharepoint.com/session"}),
+                Response(202, {}),
+                Response(201, {"id": "large", "name": "large.bin", "file": {}}),
+            ]
+        )
+        assert (
+            manager.upload_file(str(large), _folder=manager._root_folder).id == "large"
+        )
 
         manager = manager_for(
             [Response(200, {"uploadUrl": "https://upload.sharepoint.com/session"})]

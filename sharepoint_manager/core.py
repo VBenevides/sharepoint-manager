@@ -78,6 +78,9 @@ _RETRY_METHODS = {"GET", "HEAD", "OPTIONS", "PUT"}
 _GRAPH_CHUNK_UNIT = 327680
 # ~6.25 MiB upload chunk – within Graph's 5–10 MiB recommendation.
 _UPLOAD_CHUNK_SIZE = 20 * _GRAPH_CHUNK_UNIT
+# One direct Graph content request is cheaper than creating a resumable session
+# for files that fit in the normal upload chunk.
+_DIRECT_UPLOAD_MAX_BYTES = _UPLOAD_CHUNK_SIZE
 # Streaming download chunk size.
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 # GUID pattern used to extract a tenant id from authorization URIs.
@@ -1476,6 +1479,54 @@ class SharepointManager(SharepointManagerBase):
     # Upload files/folders to Sharepoint
     # ----------------------------------------------------------
 
+    def _upload_file_direct(
+        self,
+        local_file_path: str,
+        target_folder: SPFolder,
+        file_size_b: int,
+        conflict_behavior: Literal["fail", "replace", "rename"],
+    ) -> SPFile:
+        file_name = get_filename(local_file_path)
+        encoded_name = quote_segment(file_name)
+        url = (
+            f"{self._graph_base_url}/sites/{self._site_id}/drives/{self._drive_id}"
+            f"/items/{target_folder.id}:/{encoded_name}:/content"
+        )
+        try:
+            with open(local_file_path, "rb") as source:
+                response = self._request(
+                    "PUT",
+                    url,
+                    headers=self._hdr(),
+                    timeout=60,
+                    params={"@microsoft.graph.conflictBehavior": conflict_behavior},
+                    data=source.read(),
+                )
+            self._raise_for_status(response)
+            result = SPFile.from_dict(response.json())
+        except Exception as exc:
+            self._emit_telemetry(
+                "transfer",
+                operation="upload",
+                bytes=0,
+                expected_bytes=file_size_b,
+                items=1,
+                outcome="failure",
+                partial=False,
+                failure_class=type(exc).__name__,
+            )
+            raise SPAmbiguousWriteError(url, exc) from exc
+        self._emit_telemetry(
+            "transfer",
+            operation="upload",
+            bytes=file_size_b,
+            expected_bytes=file_size_b,
+            items=1,
+            outcome="success",
+            partial=False,
+        )
+        return result
+
     def upload_file(
         self,
         local_file_path: str,
@@ -1528,6 +1579,14 @@ class SharepointManager(SharepointManagerBase):
         file_size_b = os.path.getsize(local_file_path)
         self._check_file_budget(file_size_b)
         file_size_mb = file_size_b / (1024 * 1024)
+
+        if file_size_b <= _DIRECT_UPLOAD_MAX_BYTES:
+            return self._upload_file_direct(
+                local_file_path,
+                target_folder,
+                file_size_b,
+                conflict_behavior,
+            )
 
         logger.info("Uploading file (%.1f MB)", file_size_mb)
 
