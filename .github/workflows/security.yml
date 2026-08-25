@@ -27,7 +27,8 @@ jobs:
       - name: Audit dependencies and licenses
         run: |
           pip-audit
-          pip-licenses --fail-on="GPL;LGPL;AGPL"
+          # Apply the deny-list to metadata and legacy classifier values.
+          pip-licenses --from=all --partial-match --fail-on="GPL;LGPL;AGPL"
       - name: Generate and validate SBOM
         run: |
           cyclonedx-py environment --output-format json --output-file sbom.json
