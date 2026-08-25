@@ -15,17 +15,26 @@ def main() -> None:
 
     codeql = (workflow_dir / "codeql.yml").read_text()
     for required in (
-        "  pull_request:",
-        "  push:",
+        'pull_request:\n    branches: ["**"]',
+        'push:\n    branches: ["**"]',
         'cron: "43 3 * * 1"',
         "security-events: write",
         "queries: security-extended",
         "github/codeql-action/init@",
         "github/codeql-action/analyze@",
-        "pip-audit",
-        "cyclonedx-py environment",
     ):
         assert required in codeql, required
+
+    security = (workflow_dir / "security.yml").read_text()
+    for required in (
+        'push:\n    branches: ["**"]',
+        'pull_request:\n    branches: ["**"]',
+        "pip-audit",
+        "pip-licenses",
+        "cyclonedx-py environment",
+        "gitleaks/gitleaks-action@",
+    ):
+        assert required in security, required
 
 
 if __name__ == "__main__":

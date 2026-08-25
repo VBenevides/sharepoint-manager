@@ -15,6 +15,10 @@ The focused checks use fake authentication and do not need tenant credentials.
 Do not run destructive Graph operations against production. Staging tests use
 only tagged disposable content and require explicit configuration for writes.
 
+`ruff check` must exit with zero errors. Use `ruff check --fix` for Ruff rules
+with safe fixes; import-position diagnostics that cross executable module code
+require manual review because moving them can change initialization order.
+
 Use `type(scope): subject` commit messages. Releases are immutable `vX.Y.Z`
 tags; the protected release workflow checks `VERSION`, `CHANGELOG.md`, build
 metadata, attestations, and the published installation.

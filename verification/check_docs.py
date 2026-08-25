@@ -20,7 +20,7 @@ def main() -> None:
     ):
         assert required in readme, required
     assert "python -m unittest discover -s tests -v" in contributing
-    assert "least-privilege staging site" in security
+    assert "least-privilege test site" in security
     assert "iter_folder_delta()" in migration
     assert "UserDelegatedCredential" in migration
 

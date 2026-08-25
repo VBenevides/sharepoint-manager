@@ -15,10 +15,6 @@ def main() -> None:
         "ruff check",
         "pyright sharepoint_manager",
         "python -m build",
-        "pip-audit",
-        "pip-licenses",
-        "cyclonedx-py",
-        "gitleaks/gitleaks-action",
     ):
         assert required in workflow, required
 

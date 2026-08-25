@@ -34,9 +34,7 @@ jobs:
           python -m compileall -q sharepoint_manager verification tests
           python -m unittest discover -s tests -v
       - name: Dependency consistency
-        run: |
-          python -m pip check
-          pip-audit
+        run: python -m pip check
 
   static:
     name: Static checks
@@ -64,7 +62,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14"
-      - name: Install build and audit tools
+      - name: Install build tools
         run: python -m pip install ".[dev]"
       - name: Build
         run: python -m build --sdist --wheel
@@ -74,23 +72,8 @@ jobs:
           python -m pip check
           python -c "import sharepoint_manager; print(sharepoint_manager.__version__)"
           twine check --strict dist/*
-      - name: Dependency audit, license policy, and SBOM
-        run: |
-          pip-audit
-          pip-licenses --fail-on="GPL;LGPL;AGPL"
-          cyclonedx-py environment --output-format json --output-file sbom.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: package-audit
+          name: package-build
           path: |
             dist/*
-            sbom.json
-
-  secrets:
-    name: Secret scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
