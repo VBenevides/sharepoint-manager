@@ -39,12 +39,14 @@ from .exceptions import (
     SPAuthenticationError,
     SPAuthorizationError,
     SPConflictError,
+    SPDeadlineExceeded,
     SPDriveNotFound,
     SPFileIntegrityError,
     SPFileNotFound,
     SPFolderNotEmpty,
     SPFolderNotFound,
     SPGraphError,
+    SPNotFoundError,
     SPThrottledError,
     SPUnauthorizedTarget,
     SPValidationError,
@@ -407,13 +409,25 @@ class SharepointManagerBase:
         max_attempts = min(max_attempts, policy.max_retry_attempts) if retryable else 1
         deadline = time.monotonic() + policy.wall_clock_seconds
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SPDeadlineExceeded(
+                    "Graph request deadline exceeded", retryable=True
+                )
             request_started = time.monotonic()
+            request_timeout = remaining if timeout is None else timeout
+            if isinstance(request_timeout, tuple):
+                request_timeout = tuple(
+                    min(float(value), remaining) for value in request_timeout
+                )
+            elif isinstance(request_timeout, (int, float)):
+                request_timeout = min(float(request_timeout), remaining)
             try:
                 resp = self._perform_request(
                     method=method,
                     url=url,
                     headers=headers,
-                    timeout=timeout,
+                    timeout=request_timeout,
                     json=json,
                     data=data,
                     params=params,
@@ -434,10 +448,28 @@ class SharepointManagerBase:
                     or attempt >= max_attempts
                     or time.monotonic() >= deadline
                 ):
+                    if time.monotonic() >= deadline:
+                        raise SPDeadlineExceeded(
+                            "Graph request deadline exceeded",
+                            retryable=True,
+                            cause=exc,
+                        ) from exc
                     raise
                 time.sleep(min(2**attempt, policy.max_retry_after_seconds))
                 attempt += 1
                 continue
+            if time.monotonic() >= deadline:
+                request_id = resp.headers.get("request-id") or resp.headers.get(
+                    "client-request-id"
+                )
+                status = resp.status_code
+                resp.close()
+                raise SPDeadlineExceeded(
+                    "Graph request deadline exceeded",
+                    status=status,
+                    request_id=request_id,
+                    retryable=True,
+                )
             if authenticated and 300 <= resp.status_code < 400:
                 resp.close()
                 raise SPValidationError("Authenticated Graph redirects are not allowed")
@@ -487,12 +519,24 @@ class SharepointManagerBase:
                     resp.close()
                 except Exception:
                     pass
+                if time.monotonic() >= deadline:
+                    raise SPDeadlineExceeded(
+                        "Graph request deadline exceeded",
+                        status=resp.status_code,
+                        request_id=request_id,
+                        retryable=True,
+                    )
                 time.sleep(delay)
                 attempt += 1
                 continue
             return resp
 
-    def _raise_for_status(self, response: requests.Response) -> None:
+    def _raise_for_status(
+        self,
+        response: requests.Response,
+        *,
+        not_found: type[SPNotFoundError] = SPNotFoundError,
+    ) -> None:
         status = int(getattr(response, "status_code", 0))
         if status < 400:
             return
@@ -505,6 +549,7 @@ class SharepointManagerBase:
         else:
             error = None
         error_type = {
+            404: not_found,
             401: SPAuthorizationError,
             403: SPAuthorizationError,
             409: SPConflictError,
@@ -538,7 +583,9 @@ class SharepointManagerBase:
         while next_url:
             policy = getattr(self, "policy", OperationPolicy())
             if time.monotonic() - started > policy.wall_clock_seconds:
-                raise SPValidationError("Graph pagination deadline exceeded")
+                raise SPDeadlineExceeded(
+                    "Graph pagination deadline exceeded", retryable=True
+                )
             if page_count >= policy.max_pages:
                 raise SPValidationError("Graph page budget exceeded")
             if _budget is not None:
@@ -581,7 +628,9 @@ class SharepointManagerBase:
         while next_url:
             policy = getattr(self, "policy", OperationPolicy())
             if time.monotonic() - started > policy.wall_clock_seconds:
-                raise SPValidationError("Graph pagination deadline exceeded")
+                raise SPDeadlineExceeded(
+                    "Graph pagination deadline exceeded", retryable=True
+                )
             if page_count >= policy.max_pages:
                 raise SPValidationError("Graph page budget exceeded")
             if next_url in seen:
@@ -872,7 +921,9 @@ class SharepointManager(SharepointManagerBase):
     # Direct URL methods (share URL)
     # ----------------------------------------------------------
 
-    def _get_drive_item_from_url(self, url: str) -> dict[str, Any]:
+    def _get_drive_item_from_url(
+        self, url: str, *, not_found: type[SPNotFoundError] = SPNotFoundError
+    ) -> dict[str, Any]:
         self._validate_sharepoint_url(url)
         encoded_url = share_id(url)
         response = self._request(
@@ -883,7 +934,7 @@ class SharepointManager(SharepointManagerBase):
             authenticated=True,
         )
         try:
-            self._raise_for_status(response)
+            self._raise_for_status(response, not_found=not_found)
             item = response.json()
         finally:
             response.close()
@@ -912,14 +963,14 @@ class SharepointManager(SharepointManagerBase):
         >>> file_metadata = manager.get_file_metadata_from_url(url = "https://tenant.sharepoint.com/...")
         """
 
-        data = self._get_drive_item_from_url(url)
+        data = self._get_drive_item_from_url(url, not_found=SPFileNotFound)
         if "file" not in data:
             raise SPFileNotFound("SP file not found")
         return SPFile.from_dict(data)
 
     def get_folder_metadata_from_url(self, url: str) -> SPFolder:
         """Resolve an approved SharePoint folder URL within this manager's boundary."""
-        data = self._get_drive_item_from_url(url)
+        data = self._get_drive_item_from_url(url, not_found=SPFolderNotFound)
         if "folder" not in data and "root" not in data:
             raise SPFolderNotFound("SP folder not found")
         return SPFolder.from_dict(data)
@@ -1143,7 +1194,9 @@ class SharepointManager(SharepointManagerBase):
                 if d.get("name") == self.document_folder_name:
                     self._drive_id = d["id"]
                     return self._drive_id
-            raise SPDriveNotFound("Requested document library was not found")
+            raise SPDriveNotFound(
+                "Requested document library was not found", status=404
+            )
 
         # Auto-detect the default document library only when no name was provided.
         r = self._request(
@@ -1152,11 +1205,10 @@ class SharepointManager(SharepointManagerBase):
             headers=self._hdr(),
             timeout=30,
         )
-        if r.status_code == 200:
-            self._drive_id = r.json()["id"]
-            self.document_folder_name = unquote(r.json()["webUrl"].split("/")[-1])
-            return self._drive_id
-        raise RuntimeError("Drive not found for site")
+        self._raise_for_status(r, not_found=SPDriveNotFound)
+        self._drive_id = r.json()["id"]
+        self.document_folder_name = unquote(r.json()["webUrl"].split("/")[-1])
+        return self._drive_id
 
     def _get_folder(self, folder_path: str) -> SPFolder:
         """Resolve a folder under the current drive by its relative path."""
@@ -1174,9 +1226,7 @@ class SharepointManager(SharepointManagerBase):
             timeout=30,
         )
 
-        if r.status_code == 404:
-            raise SPFolderNotFound("SP Folder not found")
-        self._raise_for_status(r)
+        self._raise_for_status(r, not_found=SPFolderNotFound)
         return SPFolder.from_dict(r.json())
 
     def _get_file(self, filename: str, folder: SPFolder | None = None) -> SPFile:
@@ -1186,9 +1236,7 @@ class SharepointManager(SharepointManagerBase):
         encoded_name = quote_segment(filename)
         url = f"{self._graph_base_url}/drives/{drive_id}/items/{folder_id}:/{encoded_name}"
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
-        if r.status_code == 404:
-            raise SPFileNotFound("SP file not found")
-        self._raise_for_status(r)
+        self._raise_for_status(r, not_found=SPFileNotFound)
         data = r.json()
         if "file" not in data:
             # Path resolved to a folder, not a file.
@@ -1282,7 +1330,7 @@ class SharepointManager(SharepointManagerBase):
         depth: int | None = None,
     ) -> None:
         if time.monotonic() - budget["started"] > self.policy.wall_clock_seconds:
-            raise SPValidationError("Transfer deadline exceeded")
+            raise SPDeadlineExceeded("Transfer deadline exceeded", retryable=True)
         budget["bytes"] += byte_count
         budget["items"] += items
         budget["pages"] += pages

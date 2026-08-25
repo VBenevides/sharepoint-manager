@@ -34,6 +34,7 @@ from .exceptions import (
     SPFolderNotEmpty,
     SPFolderNotFound,
     SPGraphError,
+    SPNotFoundError,
     SPThrottledError,
     SPValidationError,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "SPFolderNotEmpty",
     "SPFolderNotFound",
     "SPGraphError",
+    "SPNotFoundError",
     "SPThrottledError",
     "SPValidationError",
     "SharepointManager",

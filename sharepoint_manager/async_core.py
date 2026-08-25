@@ -27,10 +27,12 @@ from .exceptions import (
     SPAuthenticationError,
     SPAuthorizationError,
     SPConflictError,
+    SPDeadlineExceeded,
     SPFileIntegrityError,
     SPFileNotFound,
     SPFolderNotFound,
     SPGraphError,
+    SPNotFoundError,
     SPThrottledError,
     SPValidationError,
 )
@@ -251,6 +253,8 @@ class AsyncSharepointManager:
     async def _request(
         self, method: str, url: str, *, authenticated: bool = True, **kwargs: Any
     ) -> Any:
+        if self._closed:
+            raise SPValidationError("SharePoint manager is closed")
         if authenticated:
             self._validate_graph_url(url)
             headers = dict(kwargs.pop("headers", {}))
@@ -258,29 +262,78 @@ class AsyncSharepointManager:
             kwargs["headers"] = headers
         else:
             self._validate_capability_url(url)
+        kwargs.setdefault("timeout", self.policy.wall_clock_seconds)
         async with self._request_gate:
-            return await (await self._get_client()).request(method, url, **kwargs)
+            started = time.monotonic()
+            response = await (await self._get_client()).request(method, url, **kwargs)
+            if time.monotonic() - started > self.policy.wall_clock_seconds:
+                request_id = response.headers.get("request-id") or response.headers.get(
+                    "client-request-id"
+                )
+                if hasattr(response, "aclose"):
+                    await response.aclose()
+                raise SPDeadlineExceeded(
+                    "Graph request deadline exceeded",
+                    status=getattr(response, "status_code", None),
+                    request_id=request_id,
+                    retryable=True,
+                )
+            return response
 
     async def _retry_request(self, method: str, url: str, **kwargs: Any) -> Any:
+        deadline = time.monotonic() + self.policy.wall_clock_seconds
         for attempt in range(self.policy.max_retry_attempts):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SPDeadlineExceeded(
+                    "Graph request deadline exceeded", retryable=True
+                )
             response = await self._request(method, url, **kwargs)
+            if time.monotonic() >= deadline:
+                request_id = response.headers.get("request-id") or response.headers.get(
+                    "client-request-id"
+                )
+                if hasattr(response, "aclose"):
+                    await response.aclose()
+                raise SPDeadlineExceeded(
+                    "Graph request deadline exceeded",
+                    status=getattr(response, "status_code", None),
+                    request_id=request_id,
+                    retryable=True,
+                )
             if (
                 response.status_code not in _RETRY_STATUSES
                 or attempt + 1 >= self.policy.max_retry_attempts
             ):
                 return response
-            await asyncio.sleep(min(2**attempt, self.policy.max_retry_after_seconds))
+            delay = min(2**attempt, self.policy.max_retry_after_seconds, remaining)
+            if delay >= remaining:
+                raise SPDeadlineExceeded(
+                    "Graph request deadline exceeded",
+                    status=response.status_code,
+                    request_id=response.headers.get("request-id"),
+                    retryable=True,
+                )
+            await asyncio.sleep(delay)
         raise SPGraphError("Request retry budget exhausted")
 
-    def _raise_for_status(self, response: Any) -> None:
+    def _raise_for_status(
+        self,
+        response: Any,
+        *,
+        not_found: type[SPNotFoundError] = SPNotFoundError,
+    ) -> None:
         status = int(response.status_code)
         if status < 400:
             return
         if status == 401:
             error_type = SPAuthenticationError
             message = "Graph authentication failed"
-        elif status in {403, 404}:
-            error_type = SPAuthorizationError if status == 403 else SPFileNotFound
+        elif status == 403:
+            error_type = SPAuthorizationError
+            message = "Graph resource request failed"
+        elif status == 404:
+            error_type = not_found
             message = "Graph resource request failed"
         elif status == 409:
             error_type = SPConflictError
@@ -299,21 +352,29 @@ class AsyncSharepointManager:
             failure_class=error_type.__name__,
             retryable=retryable,
         )
-        raise error_type(message, status=status, retryable=retryable)
+        request_id = response.headers.get("request-id") or response.headers.get(
+            "client-request-id"
+        )
+        raise error_type(
+            message,
+            status=status,
+            request_id=request_id,
+            retryable=retryable,
+        )
 
     @staticmethod
     def _share_id(url: str) -> str:
         return share_id(url)
 
-    async def _get_item_from_url(self, url: str) -> dict[str, Any]:
+    async def _get_item_from_url(
+        self, url: str, *, not_found: type[SPNotFoundError] = SPNotFoundError
+    ) -> dict[str, Any]:
         SharepointManagerBase._validate_sharepoint_url(url)
         response = await self._retry_request(
             "GET",
             f"https://{self.graph_host}/v1.0/shares/{self._share_id(url)}/driveItem",
         )
-        if response.status_code == 404:
-            raise SPFolderNotFound("SharePoint URL was not found")
-        self._raise_for_status(response)
+        self._raise_for_status(response, not_found=not_found)
         return response.json()
 
     async def _children(
@@ -328,7 +389,7 @@ class AsyncSharepointManager:
             "GET",
             f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}/children",
         )
-        self._raise_for_status(response)
+        self._raise_for_status(response, not_found=SPFolderNotFound)
         files: dict[str, SPFile] = {}
         folders: dict[str, SPFolder] = {}
         for item in response.json().get("value", []):
@@ -350,7 +411,7 @@ class AsyncSharepointManager:
         depth: int | None = None,
     ) -> None:
         if time.monotonic() - budget["started"] > self.policy.wall_clock_seconds:
-            raise SPValidationError("Transfer deadline exceeded")
+            raise SPDeadlineExceeded("Transfer deadline exceeded", retryable=True)
         budget["bytes"] += byte_count
         budget["items"] += items
         budget["pages"] += pages
@@ -420,7 +481,9 @@ class AsyncSharepointManager:
         digest.update(chunk)
 
     async def download_file_from_url(self, url: str, destination: str) -> SPFile:
-        item = SPFile.from_dict(await self._get_item_from_url(url))
+        item = SPFile.from_dict(
+            await self._get_item_from_url(url, not_found=SPFileNotFound)
+        )
         os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
         budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
         self._consume_budget(budget, items=1)
@@ -498,7 +561,9 @@ class AsyncSharepointManager:
     async def upload_file_to_folder_url(
         self, folder_url: str, local_path: str
     ) -> SPFile:
-        folder = SPFolder.from_dict(await self._get_item_from_url(folder_url))
+        folder = SPFolder.from_dict(
+            await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
+        )
         budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
         result = await self._upload_file(folder, local_path, budget)
         self._emit(
@@ -511,7 +576,9 @@ class AsyncSharepointManager:
         return result
 
     async def download_folder_from_url(self, folder_url: str, destination: str) -> None:
-        folder = SPFolder.from_dict(await self._get_item_from_url(folder_url))
+        folder = SPFolder.from_dict(
+            await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
+        )
         budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
         await self._download_folder(folder, destination, budget, depth=0)
 
@@ -538,7 +605,9 @@ class AsyncSharepointManager:
         source = Path(local_path)
         if not source.is_dir() or source.is_symlink():
             raise SPValidationError("Upload source must be a regular folder")
-        folder = SPFolder.from_dict(await self._get_item_from_url(folder_url))
+        folder = SPFolder.from_dict(
+            await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
+        )
         budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
         await self._upload_folder(folder, source, budget, depth=0)
 
