@@ -1450,19 +1450,21 @@ class SharepointManager(SharepointManagerBase):
         self._raise_for_status(r)
         return SPFolder.from_dict(r.json())
 
-    def _create_folder(self, folder_path: str) -> SPFolder | None:
-        try:
-            return self._get_folder(folder_path)
-        except SPFolderNotFound:
-            pass
-
+    def _create_folder(
+        self, folder_path: str, *, target_missing: bool = False
+    ) -> SPFolder | None:
+        if not target_missing:
+            try:
+                return self._get_folder(folder_path)
+            except SPFolderNotFound:
+                pass
         parts = folder_path.split("/")
         parent_folder = "/".join(parts[:-1])
         folder_name = parts[-1]
         try:
             parent_data = self._get_folder(parent_folder)
         except SPFolderNotFound:
-            parent_data = self._create_folder(parent_folder)
+            parent_data = self._create_folder(parent_folder, target_missing=True)
 
         if parent_data is None:
             raise SPFolderNotFound("SP Parent folder not found")
@@ -1786,7 +1788,7 @@ class SharepointManager(SharepointManagerBase):
         except SPFolderNotFound:
             if not create_folder:
                 raise SPFolderNotFound("SP Folder does not exist")
-            folder_data = self._create_folder(target_folder)
+            folder_data = self._create_folder(target_folder, target_missing=True)
         if folder_data is None:
             raise SPFolderNotFound("SP Folder could not be created or resolved")
         if folder_data.name != fnames[-1]:
