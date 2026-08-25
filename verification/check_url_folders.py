@@ -137,6 +137,21 @@ def main() -> None:
     manager.delete_folder_from_url(share_url)
     assert deleted and deleted[0][0] == "DELETE"
 
+    child_lists = []
+
+    def force_delete_request(method, url, **kwargs):
+        if "/shares/" in url:
+            return Response(folder)
+        if url.endswith("/children"):
+            child_lists.append(url)
+            return Response({"value": [{"id": "should-not-be-read"}]})
+        deleted.append((method, url))
+        return Response({})
+
+    manager._request = force_delete_request
+    manager.delete_folder_from_url(share_url, force_delete=True)
+    assert not child_lists
+
     manager._request = lambda method, url, **kwargs: Response(
         {**folder, "parentReference": {"siteId": "site-b", "driveId": "drive-a"}}
     )

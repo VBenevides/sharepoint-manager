@@ -2221,17 +2221,17 @@ class SharepointManager(SharepointManagerBase):
             target = folder
             self._validate_object_boundary(target)
 
-        files, folders = self._list_children(target)
+        if not force_delete:
+            files, folders = self._list_children(target)
+            if files or folders:
+                raise SPFolderNotEmpty("Sharepoint folder not empty")
 
-        if (len(files) == 0 and len(folders) == 0) or force_delete:
-            drive_id = self._drive_id
-            folder_id = target.id
-            r = self._request(
-                "DELETE",
-                f"{self._graph_base_url}/drives/{drive_id}/items/{folder_id}",
-                headers=self._hdr(),
-                timeout=30,
-            )
-            self._raise_for_status(r)
-        else:
-            raise SPFolderNotEmpty("Sharepoint folder not empty")
+        drive_id = self._drive_id
+        folder_id = target.id
+        r = self._request(
+            "DELETE",
+            f"{self._graph_base_url}/drives/{drive_id}/items/{folder_id}",
+            headers=self._hdr(),
+            timeout=30,
+        )
+        self._raise_for_status(r)
