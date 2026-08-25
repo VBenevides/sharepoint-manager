@@ -46,7 +46,7 @@ class Client:
             if "/shares/" in url:
                 share_id = url.split("/shares/", 1)[1].split("/", 1)[0]
                 return Response(self.items[share_id])
-            if url.endswith("/children"):
+            if "/children" in url:
                 if method == "POST":
                     return Response(
                         {
@@ -56,7 +56,10 @@ class Client:
                             "parentReference": {"driveId": "drive"},
                         }
                     )
-                return Response({"value": self.children.get(url, [])})
+                children = self.children.get(url, [])
+                return Response(
+                    children if isinstance(children, dict) else {"value": children}
+                )
             if method == "POST" and url.endswith("createUploadSession"):
                 upload_url = "https://tenant.sharepoint.com/upload/session"
                 return Response({"uploadUrl": upload_url})
@@ -119,7 +122,13 @@ async def main() -> None:
     client.items[manager._share_id(folder_url)] = folder_payload
     client.children[
         "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
-    ] = [file_payload]
+    ] = {
+        "value": [file_payload],
+        "@odata.nextLink": "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children?page=2",
+    }
+    client.children[
+        "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children?page=2"
+    ] = {"value": [file_payload_2]}
 
     class RetryResponse:
         def __init__(self, status_code, retry_after="10"):
@@ -227,6 +236,33 @@ async def main() -> None:
 
         await manager.download_folder_from_url(folder_url, directory)
         assert (Path(directory) / "folder" / "remote.bin").read_bytes() == b"payload"
+        assert (Path(directory) / "folder" / "remote-2.bin").read_bytes() == b"payload"
+
+        first_children_url = (
+            "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
+        )
+        saved_children = client.children[first_children_url]
+        client.children[first_children_url] = {
+            "value": [],
+            "@odata.nextLink": first_children_url,
+        }
+        try:
+            await manager.download_folder_from_url(folder_url, directory)
+        except SPValidationError:
+            pass
+        else:
+            raise AssertionError("repeated async pagination link accepted")
+        client.children[first_children_url] = saved_children
+
+        saved_policy = manager.policy
+        manager.policy = OperationPolicy(max_concurrency=2, max_pages=1)
+        try:
+            await manager.download_folder_from_url(folder_url, directory)
+        except SPValidationError:
+            pass
+        else:
+            raise AssertionError("async pagination page budget was ignored")
+        manager.policy = saved_policy
 
         try:
             await manager.download_file_from_url(

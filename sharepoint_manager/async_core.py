@@ -451,26 +451,49 @@ class AsyncSharepointManager:
     async def _children(
         self, folder: SPFolder, budget: dict[str, Any] | None = None
     ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
-        if budget is not None:
-            self._consume_budget(budget, pages=1)
+        budget = budget or {
+            "bytes": 0,
+            "items": 0,
+            "pages": 0,
+            "started": time.monotonic(),
+        }
         drive_id = folder.parent_reference.get("driveId")
         if not drive_id:
             raise SPValidationError("Folder has no trusted drive reference")
-        response = await self._retry_request(
-            "GET",
-            f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}/children",
-        )
-        self._raise_for_status(response, not_found=SPFolderNotFound)
         files: dict[str, SPFile] = {}
         folders: dict[str, SPFolder] = {}
-        for item in response.json().get("value", []):
-            self._validate_boundary(item)
-            if "file" in item:
-                file = SPFile.from_dict(item)
-                files[file.name] = file
-            elif "folder" in item:
-                child = SPFolder.from_dict(item)
-                folders[child.name] = child
+        next_url: str | None = (
+            f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}/children"
+        )
+        seen: set[str] = set()
+        item_count = 0
+        while next_url:
+            if not isinstance(next_url, str) or next_url in seen:
+                raise SPValidationError("Invalid or repeated Graph pagination link")
+            seen.add(next_url)
+            self._consume_budget(budget, pages=1)
+            self._validate_graph_url(next_url)
+            response = await self._retry_request("GET", next_url)
+            try:
+                self._raise_for_status(response, not_found=SPFolderNotFound)
+                data = response.json()
+            finally:
+                await self._close_response(response)
+            values = data.get("value", [])
+            item_count += len(values)
+            if item_count > self.policy.max_items:
+                raise SPValidationError("Graph item budget exceeded")
+            for item in values:
+                self._validate_boundary(item)
+                if "file" in item:
+                    file = SPFile.from_dict(item)
+                    files[file.name] = file
+                elif "folder" in item:
+                    child = SPFolder.from_dict(item)
+                    folders[child.name] = child
+            next_url = data.get("@odata.nextLink")
+            if next_url is not None and not isinstance(next_url, str):
+                raise SPValidationError("Invalid Graph pagination link")
         return files, folders
 
     def _consume_budget(
