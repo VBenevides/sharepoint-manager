@@ -536,24 +536,25 @@ class AsyncSharepointManager:
         try:
             client = await self._get_client()
             if hasattr(client, "stream"):
-                response_context = client.stream("GET", item.download_url)
-                async with response_context as response:
-                    self._raise_for_status(response)
-                    chunks: AsyncIterator[bytes] = response.aiter_bytes(
-                        _DOWNLOAD_CHUNK_SIZE
-                    )
-                    with os.fdopen(fd, "wb") as output:
-                        fd = None
-                        async for chunk in chunks:
-                            await self._consume_chunk(
-                                output,
-                                chunk,
-                                digest,
-                                budget,
-                                downloaded,
-                                int(item.size),
-                            )
-                            downloaded += len(chunk)
+                async with self._request_gate:
+                    response_context = client.stream("GET", item.download_url)
+                    async with response_context as response:
+                        self._raise_for_status(response)
+                        chunks: AsyncIterator[bytes] = response.aiter_bytes(
+                            _DOWNLOAD_CHUNK_SIZE
+                        )
+                        with os.fdopen(fd, "wb") as output:
+                            fd = None
+                            async for chunk in chunks:
+                                await self._consume_chunk(
+                                    output,
+                                    chunk,
+                                    digest,
+                                    budget,
+                                    downloaded,
+                                    int(item.size),
+                                )
+                                downloaded += len(chunk)
             else:
                 response = await self._request(
                     "GET", item.download_url, authenticated=False

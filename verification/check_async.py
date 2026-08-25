@@ -82,6 +82,35 @@ class Client:
             self.active -= 1
 
 
+class StreamingResponse(Response):
+    async def aiter_bytes(self, chunk_size):
+        await asyncio.sleep(0.02)
+        yield self.content
+
+
+class StreamingClient(Client):
+    def __init__(self):
+        super().__init__()
+        self.stream_active = 0
+        self.max_stream_active = 0
+
+    def stream(self, method, url):
+        client = self
+
+        class Context:
+            async def __aenter__(self):
+                client.stream_active += 1
+                client.max_stream_active = max(
+                    client.max_stream_active, client.stream_active
+                )
+                return StreamingResponse(content=b"payload")
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                client.stream_active -= 1
+
+        return Context()
+
+
 class Provider:
     def get_token(self, scope):
         assert scope == "https://graph.microsoft.com/.default"
@@ -229,6 +258,28 @@ async def main() -> None:
         assert first.read_bytes() == b"payload"
         assert second.read_bytes() == b"payload"
         assert client.max_active == 2
+
+        for limit in (1, 2):
+            stream_client = StreamingClient()
+            stream_client.items[manager._share_id(file_url)] = file_payload
+            stream_manager = AsyncSharepointManager(
+                "https://tenant.sharepoint.com/sites/demo",
+                token_provider=Provider(),
+                policy=OperationPolicy(max_concurrency=limit),
+                client=stream_client,
+            )
+            stream_manager._site_id = "site"
+            stream_manager._drive_id = "drive"
+            await asyncio.gather(
+                *(
+                    stream_manager.download_file_from_url(
+                        file_url, str(Path(directory) / f"stream-{limit}-{index}.bin")
+                    )
+                    for index in range(3)
+                )
+            )
+            assert stream_client.max_stream_active == limit
+            await stream_manager.close()
 
         source = Path(directory) / "upload.bin"
         source.write_bytes(b"upload")
