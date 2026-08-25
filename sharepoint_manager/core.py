@@ -455,11 +455,17 @@ class SharepointManagerBase:
                     or time.monotonic() >= deadline
                 ):
                     if time.monotonic() >= deadline:
+                        if not authenticated:
+                            raise SPDeadlineExceeded(
+                                "Graph request deadline exceeded", retryable=True
+                            ) from None
                         raise SPDeadlineExceeded(
                             "Graph request deadline exceeded",
                             retryable=True,
                             cause=exc,
                         ) from exc
+                    if not authenticated:
+                        raise SPGraphError("Capability request failed") from None
                     raise
                 time.sleep(min(2**attempt, policy.max_retry_after_seconds))
                 attempt += 1
@@ -1744,7 +1750,7 @@ class SharepointManager(SharepointManagerBase):
             )
             self._raise_for_status(response)
             result = SPFile.from_dict(response.json())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self._emit_telemetry(
                 "transfer",
                 operation="upload",
@@ -1755,7 +1761,7 @@ class SharepointManager(SharepointManagerBase):
                 partial=False,
                 failure_class=type(exc).__name__,
             )
-            raise SPAmbiguousWriteError(url, exc) from exc
+            raise SPAmbiguousWriteError() from None
         self._emit_telemetry(
             "transfer",
             operation="upload",
@@ -1843,7 +1849,7 @@ class SharepointManager(SharepointManagerBase):
                     if next_start != end_byte + 1:
                         source.seek(next_start)
                     start_byte = next_start
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if upload_url is not None:
                 try:
                     self._request("DELETE", upload_url, timeout=30)
@@ -1859,9 +1865,9 @@ class SharepointManager(SharepointManagerBase):
                 partial=start_byte > 0,
                 failure_class=type(exc).__name__,
             )
-            raise SPAmbiguousWriteError(upload_url or session_url, exc) from exc
+            raise SPAmbiguousWriteError() from None
         if response is None:
-            raise SPAmbiguousWriteError(upload_url or session_url)
+            raise SPAmbiguousWriteError()
         try:
             result = SPFile.from_dict(response.json())
         except (TypeError, KeyError, ValueError):
@@ -1870,7 +1876,7 @@ class SharepointManager(SharepointManagerBase):
             elif target_folder is not None:
                 result = self._get_file(file_name, target_folder)
             else:
-                raise SPAmbiguousWriteError(upload_url or session_url)
+                raise SPAmbiguousWriteError()
         self._emit_telemetry(
             "transfer",
             operation="upload",

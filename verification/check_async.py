@@ -24,6 +24,7 @@ from sharepoint_manager.core import _DIRECT_UPLOAD_MAX_BYTES
 from sharepoint_manager.exceptions import (
     SPAuthenticationError,
     SPDeadlineExceeded,
+    SPGraphError,
     SPUnauthorizedTarget,
     SPValidationError,
 )
@@ -513,8 +514,8 @@ async def main() -> None:
         setup_failure = Path(directory) / "setup-failure.bin"
         try:
             await manager.download_file_from_url(file_url, str(setup_failure))
-        except RuntimeError:
-            pass
+        except SPGraphError as exc:
+            assert "stream setup failed" not in str(exc)
         else:
             raise AssertionError("stream setup failure was swallowed")
         finally:

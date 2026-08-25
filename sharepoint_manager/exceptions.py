@@ -72,9 +72,12 @@ class SPUnauthorizedTarget(SPValidationError):
 class SPAmbiguousWriteError(SPError):
     """A write may have reached Graph but its final outcome is unknown."""
 
-    def __init__(self, upload_url: str, cause: Exception | None = None) -> None:
-        super().__init__("Upload outcome is ambiguous", retryable=True, cause=cause)
-        self.upload_url = upload_url
+    def __init__(
+        self,
+        _upload_url: str | None = None,
+        _cause: Exception | None = None,
+    ) -> None:
+        super().__init__("Upload outcome is ambiguous", retryable=True)
 
 
 class SPFileIntegrityError(SPError):

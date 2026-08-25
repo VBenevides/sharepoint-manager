@@ -282,7 +282,17 @@ class AsyncSharepointManager:
         kwargs.setdefault("timeout", self.policy.wall_clock_seconds)
         async with self._request_gate:
             started = time.monotonic()
-            response = await (await self._get_client()).request(method, url, **kwargs)
+            try:
+                response = await (await self._get_client()).request(
+                    method, url, **kwargs
+                )
+            except Exception:  # noqa: BLE001
+                message = (
+                    "Capability request failed"
+                    if not authenticated
+                    else "Graph request failed"
+                )
+                raise SPGraphError(message) from None
             if time.monotonic() - started > self.policy.wall_clock_seconds:
                 request_id = response.headers.get("request-id") or response.headers.get(
                     "client-request-id"
@@ -579,24 +589,34 @@ class AsyncSharepointManager:
             client = await self._get_client()
             if hasattr(client, "stream"):
                 async with self._request_gate:
-                    response_context = client.stream("GET", item.download_url)
-                    async with response_context as response:
-                        self._raise_for_status(response)
-                        chunks: AsyncIterator[bytes] = response.aiter_bytes(
-                            _DOWNLOAD_CHUNK_SIZE
-                        )
-                        with os.fdopen(fd, "wb") as output:
-                            fd = None
-                            async for chunk in chunks:
-                                await self._consume_chunk(
-                                    output,
-                                    chunk,
-                                    digest,
-                                    budget,
-                                    downloaded,
-                                    int(item.size),
-                                )
-                                downloaded += len(chunk)
+                    try:
+                        response_context = client.stream("GET", item.download_url)
+                        async with response_context as response:
+                            self._raise_for_status(response)
+                            chunks: AsyncIterator[bytes] = response.aiter_bytes(
+                                _DOWNLOAD_CHUNK_SIZE
+                            )
+                            with os.fdopen(fd, "wb") as output:
+                                fd = None
+                                async for chunk in chunks:
+                                    await self._consume_chunk(
+                                        output,
+                                        chunk,
+                                        digest,
+                                        budget,
+                                        downloaded,
+                                        int(item.size),
+                                    )
+                                    downloaded += len(chunk)
+                    except (
+                        OSError,
+                        SPValidationError,
+                        SPFileIntegrityError,
+                        SPGraphError,
+                    ):
+                        raise
+                    except Exception:  # noqa: BLE001
+                        raise SPGraphError("Capability request failed") from None
             else:
                 response = await self._request(
                     "GET", item.download_url, authenticated=False
