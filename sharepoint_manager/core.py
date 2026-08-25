@@ -750,7 +750,10 @@ class SharepointManager(SharepointManagerBase):
 
     Examples
     --------
-    >>> creds = ClientCredential("app_id", "app_secret")
+    >>> import os
+    >>> creds = ClientCredential(
+    ...     os.environ["SP_CLIENT_ID"], os.environ["SP_CLIENT_SECRET"]
+    ... )
     >>> manager = SharepointManager(
     ... sharepoint_site_url="https://my_tenant.sharepoint.com/sites/my_site",
     ... credentials=creds,
@@ -801,7 +804,10 @@ class SharepointManager(SharepointManagerBase):
 
         Examples
         --------
-        >>> user_cred = ClientCredential("graph_id", "graph_secret") # Don't hardcode passwords
+        >>> import os
+        >>> user_cred = ClientCredential(
+        ...     os.environ["SP_CLIENT_ID"], os.environ["SP_CLIENT_SECRET"]
+        ... )
         >>> manager = SharepointManager(sharepoint_site_url = "https://my_tenant.sharepoint.com/sites/my_site",
         >>>     credentials = user_cred,
         >>> )

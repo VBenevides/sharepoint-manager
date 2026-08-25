@@ -46,11 +46,16 @@ python -m build --sdist --wheel
 ## Quickstart
 
 ```python
+import os
+
 from sharepoint_manager import ClientCredential, SharepointManager
 
 manager = SharepointManager(
     "https://tenant.sharepoint.com/sites/example",
-    ClientCredential("client-id", "client-secret"),
+    ClientCredential(
+        os.environ["SP_CLIENT_ID"],
+        os.environ["SP_CLIENT_SECRET"],
+    ),
     document_folder_name="Documents",
 )
 
