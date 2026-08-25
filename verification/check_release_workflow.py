@@ -7,6 +7,7 @@ def main() -> None:
     changelog = (root / "CHANGELOG.md").read_text()
     for required in (
         'tags: ["v*.*.*"]',
+        "attestations: write",
         "environment: release",
         "id-token: write",
         'python -m pip install ".[dev]"',

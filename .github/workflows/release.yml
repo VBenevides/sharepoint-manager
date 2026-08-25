@@ -5,6 +5,7 @@ on:
     tags: ["v*.*.*"]
 
 permissions:
+  attestations: write
   contents: read
   id-token: write
 
