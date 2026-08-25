@@ -15,9 +15,9 @@ def main() -> None:
 
     codeql = (workflow_dir / "codeql.yml").read_text()
     for required in (
-        'pull_request:\n    branches: ["**"]',
+        'pull_request:\n    branches: ["main"]',
         'push:\n    branches: ["**"]',
-        'cron: "43 3 * * 1"',
+        'cron: "0 0 * * 1"',
         "security-events: write",
         "queries: security-extended",
         "github/codeql-action/init@",
@@ -28,7 +28,7 @@ def main() -> None:
     security = (workflow_dir / "security.yml").read_text()
     for required in (
         'push:\n    branches: ["**"]',
-        'pull_request:\n    branches: ["**"]',
+        'pull_request:\n    branches: ["main"]',
         "pip-audit",
         "pip-licenses",
         "cyclonedx-py environment",

@@ -6,6 +6,7 @@
   retaining the protected release checks.
 - Added branch and pull-request security scans for dependencies, licenses, SBOM
   generation, and secrets; CodeQL now declares the same triggers explicitly.
+- Updated the security toolchain for Python 3.14 dependency resolution.
 
 ## [0.1.0] - 2026-08-24
 
