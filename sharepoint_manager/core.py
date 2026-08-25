@@ -965,9 +965,7 @@ class SharepointManager(SharepointManagerBase):
             drive_url_name,
         )
         if relative_path is not None:
-            return self._get_drive_item_from_path(
-                relative_path, not_found=not_found
-            )
+            return self._get_drive_item_from_path(relative_path, not_found=not_found)
         encoded_url = share_id(url)
         response = self._request(
             "GET",
@@ -1259,9 +1257,7 @@ class SharepointManager(SharepointManagerBase):
         return self._drive_id
 
     @staticmethod
-    def _drive_name_from_web_url(
-        drive: dict[str, Any], fallback: str
-    ) -> str:
+    def _drive_name_from_web_url(drive: dict[str, Any], fallback: str) -> str:
         web_url = drive.get("webUrl")
         if isinstance(web_url, str) and web_url:
             return unquote(web_url.rstrip("/").split("/")[-1])

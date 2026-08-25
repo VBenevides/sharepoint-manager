@@ -21,7 +21,6 @@ def main() -> None:
     assert not (root / "requirements.txt").exists()
     assert not (root / "requirements-build.txt").exists()
     assert "VERSION" in init
-    assert version == "0.1.0"
 
     code = """
 import importlib.metadata
@@ -37,10 +36,10 @@ msal.PublicClientApplication = type("Public", (), {})
 sys.modules["msal"] = msal
 sys.path.insert(0, ".")
 import sharepoint_manager
-assert sharepoint_manager.__version__ == "0.1.0"
+assert sharepoint_manager.__version__ == sys.argv[1]
 """
     subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", code, version],
         cwd=root,
         check=True,
         capture_output=True,

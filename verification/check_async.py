@@ -67,7 +67,9 @@ class Client:
             if "/root:/" in url:
                 name = unquote(url.rsplit("/", 1)[-1])
                 return Response(
-                    next(item for item in self.items.values() if item.get("name") == name)
+                    next(
+                        item for item in self.items.values() if item.get("name") == name
+                    )
                 )
             if "/children" in url:
                 if method == "POST":
@@ -369,7 +371,10 @@ async def main() -> None:
             )
         assert len(upload_requests(workload_client)) == 100
         assert len(workload_client.requests) == 200
-        assert 200 * workload_client.request_latency < 300 * workload_client.request_latency
+        assert (
+            200 * workload_client.request_latency
+            < 300 * workload_client.request_latency
+        )
         await workload_manager.close()
 
         await manager.download_folder_from_url(folder_url, directory)
@@ -411,7 +416,9 @@ async def main() -> None:
         else:
             raise AssertionError("async cross-drive item was accepted")
 
-        oversized_url = "https://tenant.sharepoint.com/sites/demo/Documents/oversized.bin"
+        oversized_url = (
+            "https://tenant.sharepoint.com/sites/demo/Documents/oversized.bin"
+        )
         client.items[manager._share_id(oversized_url)] = {
             **file_payload,
             "id": "oversized",
@@ -453,15 +460,19 @@ async def main() -> None:
         assert b"nested" in b"".join(client.uploaded.values())
 
         cancelled = Path(directory) / "cancelled.bin"
-        task = asyncio.create_task(
-            manager.download_file_from_url(file_url, str(cancelled))
-        )
-        await asyncio.sleep(0)
-        task.cancel()
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            client.stream = StreamingClient().stream
+            task = asyncio.create_task(
+                manager.download_file_from_url(file_url, str(cancelled))
+            )
+            await asyncio.sleep(0)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        finally:
+            del client.stream
         assert not cancelled.exists()
         assert not list(Path(directory).glob(".sp-async-download-*"))
 

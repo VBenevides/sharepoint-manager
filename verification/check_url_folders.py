@@ -100,9 +100,7 @@ def main() -> None:
     assert metadata.id == "folder-a"
     sharing_url = "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc"
     assert manager.get_folder_metadata_from_url(sharing_url).id == "folder-a"
-    redirect_url = (
-        "https://tenant.sharepoint.com/:f:/r/sites/site/Shared%20Documents/Folder%20%231"
-    )
+    redirect_url = "https://tenant.sharepoint.com/:f:/r/sites/site/Shared%20Documents/Folder%20%231"
     assert manager.get_folder_metadata_from_url(redirect_url).id == "folder-a"
     assert any("/drives/drive-a/root:/Folder%20%231" in url for _, url, _ in calls)
     files, folders = manager.list_folder_from_url(share_url)
