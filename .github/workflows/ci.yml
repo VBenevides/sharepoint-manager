@@ -33,19 +33,30 @@ jobs:
         run: |
           python -m compileall -q sharepoint_manager verification tests
           python -m unittest discover -s tests -v
-      - name: Format and lint
-        run: |
-          ruff format --check tests verification sharepoint_manager
-          ruff check --select E4,E7,E9,F --ignore E402 sharepoint_manager verification
-      - name: Type check
-        run: pyright sharepoint_manager
       - name: Dependency consistency
         run: python -m pip check
+
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install ".[dev]"
+      - name: Format, lint, and type check
+        run: |
+          ruff format --check tests verification sharepoint_manager
+          ruff check --select E4,E7,E9,F --ignore E402 tests verification sharepoint_manager
+          pyright sharepoint_manager
 
   artifacts:
     name: Build and inspect artifacts
     runs-on: ubuntu-latest
-    needs: checks
+    needs: [checks, static]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

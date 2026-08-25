@@ -8,6 +8,8 @@ def main() -> None:
         '"3.14"',
         "minimum",
         "latest",
+        "name: Static checks",
+        "needs: [checks, static]",
         "python -m unittest discover -s tests -v",
         "ruff format --check",
         "ruff check",
