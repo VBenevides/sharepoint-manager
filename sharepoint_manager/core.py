@@ -466,7 +466,9 @@ class SharepointManagerBase:
             cause=error,
         )
 
-    def _paginate(self, url: str) -> Iterator[dict[str, Any]]:
+    def _paginate(
+        self, url: str, _budget: dict[str, Any] | None = None
+    ) -> Iterator[dict[str, Any]]:
         """Yield items across Graph pages following @odata.nextLink."""
         next_url: str | None = url
         seen: set[str] = set()
@@ -479,6 +481,8 @@ class SharepointManagerBase:
                 raise SPValidationError("Graph pagination deadline exceeded")
             if page_count >= policy.max_pages:
                 raise SPValidationError("Graph page budget exceeded")
+            if _budget is not None:
+                self._consume_operation_budget(_budget, pages=1)
             if next_url in seen:
                 raise SPValidationError("Repeated Graph pagination link")
             seen.add(next_url)
@@ -1232,7 +1236,12 @@ class SharepointManager(SharepointManagerBase):
             )
         return True
 
-    def _check_file_budget(self, size: int, destination: str | None = None) -> None:
+    def _check_file_budget(
+        self,
+        size: int,
+        destination: str | None = None,
+        _budget: dict[str, Any] | None = None,
+    ) -> None:
         if (
             size < 0
             or size > self.policy.max_file_bytes
@@ -1246,6 +1255,31 @@ class SharepointManager(SharepointManagerBase):
                 or shutil.disk_usage(parent).free < size
             ):
                 raise SPValidationError("Insufficient configured disk budget")
+        if _budget is not None:
+            self._consume_operation_budget(_budget, byte_count=size, items=1)
+
+    def _consume_operation_budget(
+        self,
+        budget: dict[str, Any],
+        *,
+        byte_count: int = 0,
+        items: int = 0,
+        pages: int = 0,
+        depth: int | None = None,
+    ) -> None:
+        if time.monotonic() - budget["started"] > self.policy.wall_clock_seconds:
+            raise SPValidationError("Transfer deadline exceeded")
+        budget["bytes"] += byte_count
+        budget["items"] += items
+        budget["pages"] += pages
+        if budget["bytes"] > self.policy.max_total_bytes:
+            raise SPValidationError("Transfer byte budget exceeded")
+        if budget["items"] > self.policy.max_items:
+            raise SPValidationError("Transfer item budget exceeded")
+        if budget["pages"] > self.policy.max_pages:
+            raise SPValidationError("Transfer page budget exceeded")
+        if depth is not None and depth > self.policy.max_depth:
+            raise SPValidationError("Transfer depth budget exceeded")
 
     def _check_depth(self, path: str | None) -> None:
         depth = len(get_names_to_folder(path or ""))
@@ -1455,7 +1489,9 @@ class SharepointManager(SharepointManagerBase):
         return folder_data
 
     def _list_children(
-        self, folder: SPFolder | None = None
+        self,
+        folder: SPFolder | None = None,
+        _budget: dict[str, Any] | None = None,
     ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
         """Single-pass enumeration of a folder's children.
 
@@ -1467,7 +1503,7 @@ class SharepointManager(SharepointManagerBase):
         url = f"{self._graph_base_url}/drives/{drive_id}/items/{target.id}/children"
         files: dict[str, SPFile] = {}
         folders: dict[str, SPFolder] = {}
-        for item in self._paginate(url):
+        for item in self._paginate(url, _budget=_budget):
             if "file" in item:
                 f = SPFile.from_dict(item)
                 files[f.name] = f
@@ -1702,6 +1738,7 @@ class SharepointManager(SharepointManagerBase):
         sp_relative_folder_path: str | None = None,
         _folder: SPFolder | None = None,
         conflict_behavior: Literal["fail", "replace", "rename"] = "replace",
+        _budget: dict[str, Any] | None = None,
     ) -> SPFile:
         """
         Upload a local file to SharePoint.
@@ -1746,7 +1783,7 @@ class SharepointManager(SharepointManagerBase):
 
         file_name = get_filename(local_file_path)
         file_size_b = os.path.getsize(local_file_path)
-        self._check_file_budget(file_size_b)
+        self._check_file_budget(file_size_b, _budget=_budget)
         file_size_mb = file_size_b / (1024 * 1024)
 
         if file_size_b <= _DIRECT_UPLOAD_MAX_BYTES:
@@ -1882,6 +1919,7 @@ class SharepointManager(SharepointManagerBase):
         sp_relative_folder_path: str | None = None,
         _folder: SPFolder | None = None,
         _depth: int = 0,
+        _budget: dict[str, Any] | None = None,
     ) -> None:
         """
         Recursively upload a local folder and its contents to SharePoint.
@@ -1909,11 +1947,14 @@ class SharepointManager(SharepointManagerBase):
         """
 
         local_folder_path = os.path.abspath(local_folder_path)
+        budget = _budget or {
+            "bytes": 0,
+            "items": 0,
+            "pages": 0,
+            "started": time.monotonic(),
+        }
         depth = _depth or len(get_names_to_folder(sp_relative_folder_path or ""))
-        if depth > self.policy.max_depth:
-            raise SPValidationError(
-                "Folder depth exceeds the configured traversal budget"
-            )
+        self._consume_operation_budget(budget, items=1, depth=depth)
         if os.path.islink(local_folder_path):
             raise SPValidationError("Symlink upload roots are not allowed")
         if not os.path.exists(local_folder_path):
@@ -1947,10 +1988,15 @@ class SharepointManager(SharepointManagerBase):
 
         target_folder = self._resolve_folder(sp_folder_path, create_folder=True)
         for file_path in files:
-            self.upload_file(file_path, _folder=target_folder)
+            self.upload_file(file_path, _folder=target_folder, _budget=budget)
 
         for subdir_path in subdirs:
-            self.upload_folder(subdir_path, _folder=target_folder, _depth=depth + 1)
+            self.upload_folder(
+                subdir_path,
+                _folder=target_folder,
+                _depth=depth + 1,
+                _budget=budget,
+            )
 
     # ----------------------------------------------------------
     # Download files/folders from Sharepoint
@@ -1963,6 +2009,7 @@ class SharepointManager(SharepointManagerBase):
         sp_relative_folder_path: str | None = None,
         new_filename: str | None = None,
         _folder: SPFolder | None = None,
+        _budget: dict[str, Any] | None = None,
     ) -> SPFile:
         """
         Download a file from SharePoint.
@@ -2008,7 +2055,7 @@ class SharepointManager(SharepointManagerBase):
             file_obj = file
 
         file_size_bytes = int(file_obj.size)
-        self._check_file_budget(file_size_bytes, local_download_path)
+        self._check_file_budget(file_size_bytes, local_download_path, _budget=_budget)
         logger.info("Downloading file")
 
         filename = file_obj.name if new_filename is None else new_filename
@@ -2023,6 +2070,7 @@ class SharepointManager(SharepointManagerBase):
         sp_relative_folder_path: str | None = None,
         _folder: SPFolder | None = None,
         _depth: int = 0,
+        _budget: dict[str, Any] | None = None,
     ) -> None:
         """
         Recursively download a SharePoint folder and its contents.
@@ -2048,11 +2096,14 @@ class SharepointManager(SharepointManagerBase):
         """
 
         local_download_path = os.path.abspath(local_download_path)
+        budget = _budget or {
+            "bytes": 0,
+            "items": 0,
+            "pages": 0,
+            "started": time.monotonic(),
+        }
         depth = _depth or len(get_names_to_folder(sp_relative_folder_path or ""))
-        if depth > self.policy.max_depth:
-            raise SPValidationError(
-                "Folder depth exceeds the configured traversal budget"
-            )
+        self._consume_operation_budget(budget, items=1, depth=depth)
 
         # Create local folder
         cur_folder = _folder or (
@@ -2069,10 +2120,10 @@ class SharepointManager(SharepointManagerBase):
         os.makedirs(cur_folder_download_path, exist_ok=True)
 
         # Single-pass enumeration to halve Graph round-trips per folder.
-        files, subfolders = self._list_children(cur_folder)
+        files, subfolders = self._list_children(cur_folder, _budget=budget)
 
         for file in files.values():
-            _ = self.download_file(file, cur_folder_download_path)
+            _ = self.download_file(file, cur_folder_download_path, _budget=budget)
 
         # Recurse using the resolved subfolder paths.
         for subfolder in subfolders.values():
@@ -2080,6 +2131,7 @@ class SharepointManager(SharepointManagerBase):
                 cur_folder_download_path,
                 _folder=subfolder,
                 _depth=depth + 1,
+                _budget=budget,
             )
 
     def delete_file(

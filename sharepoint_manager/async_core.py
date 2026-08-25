@@ -317,8 +317,10 @@ class AsyncSharepointManager:
         return response.json()
 
     async def _children(
-        self, folder: SPFolder
+        self, folder: SPFolder, budget: dict[str, Any] | None = None
     ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
+        if budget is not None:
+            self._consume_budget(budget, pages=1)
         drive_id = folder.parent_reference.get("driveId")
         if not drive_id:
             raise SPValidationError("Folder has no trusted drive reference")
@@ -337,6 +339,29 @@ class AsyncSharepointManager:
                 child = SPFolder.from_dict(item)
                 folders[child.name] = child
         return files, folders
+
+    def _consume_budget(
+        self,
+        budget: dict[str, Any],
+        *,
+        byte_count: int = 0,
+        items: int = 0,
+        pages: int = 0,
+        depth: int | None = None,
+    ) -> None:
+        if time.monotonic() - budget["started"] > self.policy.wall_clock_seconds:
+            raise SPValidationError("Transfer deadline exceeded")
+        budget["bytes"] += byte_count
+        budget["items"] += items
+        budget["pages"] += pages
+        if budget["bytes"] > self.policy.max_total_bytes:
+            raise SPValidationError("Transfer byte budget exceeded")
+        if budget["items"] > self.policy.max_items:
+            raise SPValidationError("Transfer item budget exceeded")
+        if budget["pages"] > self.policy.max_pages:
+            raise SPValidationError("Transfer page budget exceeded")
+        if depth is not None and depth > self.policy.max_depth:
+            raise SPValidationError("Transfer depth budget exceeded")
 
     async def _download_item(
         self, item: SPFile, destination: str, budget: dict[str, Any]
@@ -390,16 +415,16 @@ class AsyncSharepointManager:
     ) -> None:
         if not chunk:
             return
-        budget["bytes"] += len(chunk)
-        if budget["bytes"] > self.policy.max_total_bytes:
-            raise SPValidationError("Operation exceeds the configured byte budget")
+        self._consume_budget(budget, byte_count=len(chunk))
         output.write(chunk)
         digest.update(chunk)
 
     async def download_file_from_url(self, url: str, destination: str) -> SPFile:
         item = SPFile.from_dict(await self._get_item_from_url(url))
         os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
-        await self._download_item(item, destination, {"bytes": 0, "items": 0})
+        budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
+        self._consume_budget(budget, items=1)
+        await self._download_item(item, destination, budget)
         self._emit(
             "transfer",
             operation="download",
@@ -424,13 +449,20 @@ class AsyncSharepointManager:
         self._raise_for_status(response)
         return SPFolder.from_dict(response.json())
 
-    async def _upload_file(self, folder: SPFolder, local_path: str) -> SPFile:
+    async def _upload_file(
+        self,
+        folder: SPFolder,
+        local_path: str,
+        budget: dict[str, Any] | None = None,
+    ) -> SPFile:
         path = Path(local_path)
         if not path.is_file() or path.is_symlink():
             raise SPValidationError("Upload source must be a regular file")
         size = path.stat().st_size
         if size > self.policy.max_file_bytes:
             raise SPValidationError("File exceeds the configured transfer budget")
+        if budget is not None:
+            self._consume_budget(budget, byte_count=size, items=1)
         drive_id = folder.parent_reference.get("driveId")
         session_response = await self._retry_request(
             "POST",
@@ -467,7 +499,8 @@ class AsyncSharepointManager:
         self, folder_url: str, local_path: str
     ) -> SPFile:
         folder = SPFolder.from_dict(await self._get_item_from_url(folder_url))
-        result = await self._upload_file(folder, local_path)
+        budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
+        result = await self._upload_file(folder, local_path, budget)
         self._emit(
             "transfer",
             operation="upload",
@@ -479,25 +512,25 @@ class AsyncSharepointManager:
 
     async def download_folder_from_url(self, folder_url: str, destination: str) -> None:
         folder = SPFolder.from_dict(await self._get_item_from_url(folder_url))
-        budget = {"bytes": 0, "items": 0}
-        await self._download_folder(folder, destination, budget)
+        budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
+        await self._download_folder(folder, destination, budget, depth=0)
 
     async def _download_folder(
-        self, folder: SPFolder, destination: str, budget: dict[str, Any]
+        self,
+        folder: SPFolder,
+        destination: str,
+        budget: dict[str, Any],
+        depth: int,
     ) -> None:
+        self._consume_budget(budget, items=1, depth=depth)
         target = safe_join(destination, folder.name) if folder.name else destination
         os.makedirs(target, exist_ok=True)
-        files, folders = await self._children(folder)
+        files, folders = await self._children(folder, budget)
         for file in files.values():
-            budget["items"] += 1
-            if budget["items"] > self.policy.max_items:
-                raise SPValidationError("Operation exceeds the configured item budget")
+            self._consume_budget(budget, items=1)
             await self._download_item(file, safe_join(target, file.name), budget)
         for child in folders.values():
-            budget["items"] += 1
-            if budget["items"] > self.policy.max_items:
-                raise SPValidationError("Operation exceeds the configured item budget")
-            await self._download_folder(child, target, budget)
+            await self._download_folder(child, target, budget, depth + 1)
 
     async def upload_folder_to_folder_url(
         self, folder_url: str, local_path: str
@@ -506,17 +539,25 @@ class AsyncSharepointManager:
         if not source.is_dir() or source.is_symlink():
             raise SPValidationError("Upload source must be a regular folder")
         folder = SPFolder.from_dict(await self._get_item_from_url(folder_url))
-        await self._upload_folder(folder, source)
+        budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
+        await self._upload_folder(folder, source, budget, depth=0)
 
-    async def _upload_folder(self, target: SPFolder, source: Path) -> None:
+    async def _upload_folder(
+        self,
+        target: SPFolder,
+        source: Path,
+        budget: dict[str, Any],
+        depth: int,
+    ) -> None:
+        self._consume_budget(budget, items=1, depth=depth)
         child = await self._create_folder(target, source.name)
         for entry in sorted(source.iterdir(), key=lambda value: value.name):
             if entry.is_symlink():
                 raise SPValidationError("Symlinks are not allowed in upload trees")
             if entry.is_file():
-                await self._upload_file(child, str(entry))
+                await self._upload_file(child, str(entry), budget)
             elif entry.is_dir():
-                await self._upload_folder(child, entry)
+                await self._upload_folder(child, entry, budget, depth + 1)
 
     async def close(self) -> None:
         if self._closed:
