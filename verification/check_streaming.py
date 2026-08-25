@@ -38,6 +38,17 @@ def main() -> None:
 
     captured = {}
 
+    def direct(source, filename, folder, size, conflict_behavior):
+        captured["seekable"] = source.read()
+        captured["filename"] = filename
+        return SPFile(id="direct", name=filename, size=size)
+
+    manager._upload_source_direct = direct
+    assert (
+        manager.upload_fileobj(io.BytesIO(b"seekable"), "seekable.bin").id == "direct"
+    )
+    assert captured["seekable"] == b"seekable"
+
     def upload(path, *args, **kwargs):
         captured["data"] = Path(path).read_bytes()
         return SPFile(id="uploaded", name="data.bin")

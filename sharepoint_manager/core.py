@@ -1319,6 +1319,38 @@ class SharepointManager(SharepointManagerBase):
             raise TypeError("source must be a readable binary file object")
         if not filename or os.path.basename(filename) != filename:
             raise SPValidationError("filename must be a plain file name")
+        if conflict_behavior not in {"fail", "replace", "rename"}:
+            raise SPValidationError("Invalid conflict behavior")
+
+        try:
+            source.seek(0, os.SEEK_END)
+            file_size_b = source.tell()
+            source.seek(0)
+        except (AttributeError, OSError, ValueError):
+            file_size_b = None
+        if file_size_b is not None:
+            self._check_file_budget(file_size_b)
+            target_folder = _folder or (
+                self._resolve_folder(sp_relative_folder_path, create_folder=True)
+                if sp_relative_folder_path is not None
+                else self._root_folder
+            )
+            if file_size_b <= _DIRECT_UPLOAD_MAX_BYTES:
+                return self._upload_source_direct(
+                    source,
+                    filename,
+                    target_folder,
+                    file_size_b,
+                    conflict_behavior,
+                )
+            return self._upload_source_resumable(
+                source,
+                filename,
+                target_folder,
+                file_size_b,
+                conflict_behavior,
+            )
+
         with tempfile.TemporaryDirectory(prefix="sp-upload-") as directory:
             path = safe_join(directory, filename)
             total = 0
@@ -1486,22 +1518,37 @@ class SharepointManager(SharepointManagerBase):
         file_size_b: int,
         conflict_behavior: Literal["fail", "replace", "rename"],
     ) -> SPFile:
-        file_name = get_filename(local_file_path)
+        with open(local_file_path, "rb") as source:
+            return self._upload_source_direct(
+                source,
+                get_filename(local_file_path),
+                target_folder,
+                file_size_b,
+                conflict_behavior,
+            )
+
+    def _upload_source_direct(
+        self,
+        source: BinaryIO,
+        file_name: str,
+        target_folder: SPFolder,
+        file_size_b: int,
+        conflict_behavior: Literal["fail", "replace", "rename"],
+    ) -> SPFile:
         encoded_name = quote_segment(file_name)
         url = (
             f"{self._graph_base_url}/sites/{self._site_id}/drives/{self._drive_id}"
             f"/items/{target_folder.id}:/{encoded_name}:/content"
         )
         try:
-            with open(local_file_path, "rb") as source:
-                response = self._request(
-                    "PUT",
-                    url,
-                    headers=self._hdr(),
-                    timeout=60,
-                    params={"@microsoft.graph.conflictBehavior": conflict_behavior},
-                    data=source.read(),
-                )
+            response = self._request(
+                "PUT",
+                url,
+                headers=self._hdr(),
+                timeout=60,
+                params={"@microsoft.graph.conflictBehavior": conflict_behavior},
+                data=source.read(file_size_b),
+            )
             self._raise_for_status(response)
             result = SPFile.from_dict(response.json())
         except Exception as exc:
@@ -1516,6 +1563,95 @@ class SharepointManager(SharepointManagerBase):
                 failure_class=type(exc).__name__,
             )
             raise SPAmbiguousWriteError(url, exc) from exc
+        self._emit_telemetry(
+            "transfer",
+            operation="upload",
+            bytes=file_size_b,
+            expected_bytes=file_size_b,
+            items=1,
+            outcome="success",
+            partial=False,
+        )
+        return result
+
+    def _upload_source_resumable(
+        self,
+        source: BinaryIO,
+        file_name: str,
+        target_folder: SPFolder,
+        file_size_b: int,
+        conflict_behavior: Literal["fail", "replace", "rename"],
+    ) -> SPFile:
+        encoded_name = quote_segment(file_name)
+        session_url = (
+            f"{self._graph_base_url}/sites/{self._site_id}/drives/{self._drive_id}"
+            f"/items/{target_folder.id}:/{encoded_name}:/createUploadSession"
+        )
+        response: requests.Response | None = None
+        upload_url = session_url
+        start_byte = 0
+        try:
+            session = self._request(
+                "POST",
+                session_url,
+                headers=self._hdr(json_content=True),
+                timeout=30,
+                json={"item": {"@microsoft.graph.conflictBehavior": conflict_behavior}},
+            )
+            self._raise_for_status(session)
+            upload_url = str(session.json()["uploadUrl"])
+            while start_byte < file_size_b:
+                chunk = source.read(min(_UPLOAD_CHUNK_SIZE, file_size_b - start_byte))
+                if not chunk:
+                    raise SPValidationError(
+                        "Upload source ended before its declared size"
+                    )
+                end_byte = start_byte + len(chunk) - 1
+                response = self._request(
+                    "PUT",
+                    upload_url,
+                    headers={
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size_b}",
+                    },
+                    timeout=60,
+                    data=chunk,
+                )
+                self._raise_for_status(response)
+                next_start = end_byte + 1
+                try:
+                    ranges = response.json().get("nextExpectedRanges", [])
+                    if ranges:
+                        next_start = int(str(ranges[0]).split("-", 1)[0])
+                except (AttributeError, TypeError, ValueError):
+                    pass
+                if next_start < 0 or next_start > file_size_b:
+                    raise SPValidationError("Graph returned an invalid upload offset")
+                if next_start != end_byte + 1:
+                    source.seek(next_start)
+                start_byte = next_start
+        except Exception as exc:
+            try:
+                self._request("DELETE", upload_url, timeout=30)
+            except Exception:
+                pass
+            self._emit_telemetry(
+                "transfer",
+                operation="upload",
+                bytes=start_byte,
+                expected_bytes=file_size_b,
+                items=1,
+                outcome="failure",
+                partial=start_byte > 0,
+                failure_class=type(exc).__name__,
+            )
+            raise SPAmbiguousWriteError(upload_url, exc) from exc
+        if response is None:
+            raise SPAmbiguousWriteError(upload_url)
+        try:
+            result = SPFile.from_dict(response.json())
+        except (TypeError, KeyError, ValueError):
+            result = self._get_file(file_name, target_folder)
         self._emit_telemetry(
             "transfer",
             operation="upload",
