@@ -6,7 +6,7 @@ intentional breaking release from 0.0.x; see the [0.1.x contract](docs/contract-
 ## Support contract
 
 - Python: 3.10–3.14
-- Runtime dependencies: `httpx>=0.27,<1`, `msal>=1.28,<2`, and `requests>=2.31,<3`
+- Runtime dependencies: `httpx>=0.27,<1`, `msal>=1.35,<2`, and `requests>=2.33,<3`
 - API: explicit operation targets, bounded by `OperationPolicy`, and typed with `SP*` exceptions
 - Version: read from `VERSION`; 0.1.x does not preserve the 0.0.x API
 

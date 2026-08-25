@@ -10,7 +10,7 @@ def main() -> None:
     assert re.search(r'requires-python = ">=3\.10"', pyproject)
     assert all(
         dependency in pyproject
-        for dependency in ("httpx>=0.27,<1", "msal>=1.28,<2", "requests>=2.31,<3")
+        for dependency in ("httpx>=0.27,<1", "msal>=1.35,<2", "requests>=2.33,<3")
     )
     assert 'build-backend = "setuptools.build_meta"' in pyproject
     assert not (root / "setup.py").exists()
