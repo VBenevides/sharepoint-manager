@@ -12,10 +12,10 @@ sys.modules.setdefault("msal", msal)
 
 from sharepoint_manager import SharepointManager
 from sharepoint_manager.dataclasses import SPFolder
-from sharepoint_manager.exceptions import SPFolderNotFound
+from sharepoint_manager.exceptions import SPConflictError, SPFolderNotFound
 
 
-def _manager(existing: set[str]):
+def _manager(existing: set[str], conflict: bool = False):
     manager = object.__new__(SharepointManager)
     manager._drive_id = "drive"
     calls: list[tuple[str, str]] = []
@@ -33,6 +33,10 @@ def _manager(existing: set[str]):
         path = f"{parent_id}/{name}" if parent_id else name
         calls.append(("POST", path))
         folder = SPFolder(id=path, name=name)
+        if conflict:
+            existing.add(name)
+            folders[name] = folder
+            raise SPConflictError("conflict")
         folders[path] = folder
         return folder
 
@@ -59,6 +63,10 @@ def main() -> None:
         ("POST", "root/one"),
         ("POST", "root/one/two"),
     ]
+
+    manager, calls = _manager(set(), conflict=True)
+    assert manager._resolve_folder("new", create_folder=True).name == "new"
+    assert calls == [("GET", "new"), ("GET", ""), ("POST", "root/new"), ("GET", "new")]
 
 
 if __name__ == "__main__":

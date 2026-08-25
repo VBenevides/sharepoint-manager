@@ -1469,7 +1469,11 @@ class SharepointManager(SharepointManagerBase):
         if parent_data is None:
             raise SPFolderNotFound("SP Parent folder not found")
 
-        return self._create_single_folder(parent_data.id, folder_name)
+        try:
+            return self._create_single_folder(parent_data.id, folder_name)
+        except SPConflictError:
+            # A concurrent creator may have won after the initial miss.
+            return self._get_folder(folder_path)
 
     # ----------------------------------------------------------
     # Basic file system functions
