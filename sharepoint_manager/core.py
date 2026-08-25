@@ -307,6 +307,68 @@ class SharepointManagerBase:
     # Internal HTTP helpers
     # ----------------------------------------------------------
 
+    def _request_gate_for(self) -> threading.BoundedSemaphore:
+        gate = getattr(self, "_request_gate", None)
+        if gate is None:
+            gate = threading.BoundedSemaphore(
+                getattr(getattr(self, "policy", None), "max_concurrency", 1)
+            )
+            self._request_gate = gate
+        return gate
+
+    def _request_condition_for(self) -> threading.Condition:
+        condition = getattr(self, "_request_condition", None)
+        if condition is None:
+            condition = threading.Condition()
+            self._request_condition = condition
+            self._active_requests = 0
+        return condition
+
+    def _request_session(self) -> requests.Session:
+        if not getattr(self, "_owns_session", False):
+            return self._session
+        local = getattr(self, "_session_local", None)
+        if local is None:
+            local = threading.local()
+            self._session_local = local
+        session = getattr(local, "session", None)
+        if session is None:
+            if threading.get_ident() == getattr(self, "_owner_thread_id", None):
+                session = self._session
+            else:
+                session = requests.Session()
+            local.session = session
+            registry_lock = getattr(self, "_session_registry_lock", None)
+            if registry_lock is None:
+                registry_lock = threading.Lock()
+                self._session_registry_lock = registry_lock
+            with registry_lock:
+                self._session_registry[threading.get_ident()] = session
+        return session
+
+    def _perform_request(self, **kwargs: Any) -> requests.Response:
+        with self._request_gate_for():
+            condition = self._request_condition_for()
+            with condition:
+                if getattr(self, "_closed", False):
+                    raise SPValidationError("SharePoint manager is closed")
+                self._active_requests += 1
+            try:
+                session = self._request_session()
+                if not getattr(self, "_owns_session", False):
+                    shared_lock = getattr(self, "_shared_session_lock", None)
+                    if shared_lock is None:
+                        shared_lock = threading.Lock()
+                        self._shared_session_lock = shared_lock
+                    with shared_lock:
+                        return session.request(**kwargs)
+                return session.request(**kwargs)
+            finally:
+                with condition:
+                    self._active_requests -= 1
+                    if self._active_requests == 0:
+                        condition.notify_all()
+
     def _request(
         self,
         method: str,
@@ -347,19 +409,17 @@ class SharepointManagerBase:
         while True:
             request_started = time.monotonic()
             try:
-                # ponytail: one request lock; add per-session pooling only if measured throughput needs it.
-                with self._request_lock:
-                    resp = self._session.request(
-                        method=method,
-                        url=url,
-                        headers=headers,
-                        timeout=timeout,
-                        json=json,
-                        data=data,
-                        params=params,
-                        stream=stream,
-                        allow_redirects=allow_redirects,
-                    )
+                resp = self._perform_request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    timeout=timeout,
+                    json=json,
+                    data=data,
+                    params=params,
+                    stream=stream,
+                    allow_redirects=allow_redirects,
+                )
             except requests.RequestException as exc:
                 self._emit_telemetry(
                     "graph.request",
@@ -692,12 +752,24 @@ class SharepointManager(SharepointManagerBase):
             )
         self._graph_base_url = f"https://{self.graph_host}/v1.0"
         self.policy = policy or OperationPolicy()
-        self._session: requests.Session = session or requests.Session()
+        self._session: requests.Session = (
+            session if session is not None else requests.Session()
+        )
         self._owns_session = session is None
         self._closed = False
         self._close_lock = threading.Lock()
         self._token_lock = threading.Lock()
-        self._request_lock = threading.Lock()
+        self._request_gate = threading.BoundedSemaphore(self.policy.max_concurrency)
+        self._request_condition = threading.Condition()
+        self._active_requests = 0
+        self._owner_thread_id = threading.get_ident()
+        self._session_local = threading.local()
+        self._session_local.session = self._session
+        self._session_registry_lock = threading.Lock()
+        self._session_registry: dict[int, requests.Session] = {
+            self._owner_thread_id: self._session
+        }
+        self._shared_session_lock = threading.Lock()
         self.credentials = credentials
         self._token_provider = token_provider
         self.telemetry = telemetry
@@ -760,23 +832,35 @@ class SharepointManager(SharepointManagerBase):
 
     def close(self) -> None:
         """Release the underlying HTTP session."""
-        with getattr(self, "_close_lock", threading.Lock()):
+        condition = self._request_condition_for()
+        with condition:
             if getattr(self, "_closed", False):
                 return
             self._closed = True
+            while self._active_requests:
+                condition.wait()
             self._cached_token = ""
             self._cached_token_expiry = 0
             self._password = None
             self._account = None
             self.credentials = None
             provider = getattr(self, "_token_provider", None)
-            if provider is not None and hasattr(provider, "close"):
-                provider.close()
+            sessions = ()
             if getattr(self, "_owns_session", True):
-                try:
-                    self._session.close()
-                except Exception:
-                    pass
+                registry_lock = getattr(self, "_session_registry_lock", None)
+                if registry_lock is None:
+                    sessions = (self._session,)
+                else:
+                    with registry_lock:
+                        sessions = tuple(self._session_registry.values())
+                        self._session_registry.clear()
+        if provider is not None and hasattr(provider, "close"):
+            provider.close()
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass
 
     def __enter__(self) -> "SharepointManager":
         return self
