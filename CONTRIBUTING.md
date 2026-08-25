@@ -4,9 +4,9 @@ Use Python 3.10 or newer. Install the development extra, then run:
 
 ```bash
 python -m pip install -e ".[dev]"
-python verification/run_core_checks.py
-python -m compileall -q sharepoint_manager verification
-ruff format --check verification sharepoint_manager/__init__.py sharepoint_manager/dataclasses.py sharepoint_manager/exceptions.py sharepoint_manager/utils.py
+python -m unittest discover -s tests -v
+python -m compileall -q sharepoint_manager verification tests
+ruff format --check tests verification sharepoint_manager
 ruff check --select E4,E7,E9,F --ignore E402 sharepoint_manager verification
 python -m build --sdist --wheel
 ```

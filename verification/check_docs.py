@@ -19,7 +19,7 @@ def main() -> None:
         "SECURITY.md",
     ):
         assert required in readme, required
-    assert "verification/run_core_checks.py" in contributing
+    assert "python -m unittest discover -s tests -v" in contributing
     assert "least-privilege staging site" in security
     assert "iter_folder_delta()" in migration
     assert "UserDelegatedCredential" in migration

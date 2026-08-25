@@ -8,7 +8,7 @@ def main() -> None:
         '"3.14"',
         "minimum",
         "latest",
-        "verification/run_core_checks.py",
+        "python -m unittest discover -s tests -v",
         "ruff format --check",
         "ruff check",
         "pyright sharepoint_manager",
