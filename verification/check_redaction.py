@@ -8,10 +8,26 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
+from sharepoint_manager.dataclasses import SPFile
+from sharepoint_manager.exceptions import SPAmbiguousWriteError
 from sharepoint_manager.utils import safe_join
 
 
 def main() -> None:
+    canary = "https://upload.sharepoint.com/session?secret=capability-sentinel"
+    file = SPFile.from_dict(
+        {
+            "id": "file",
+            "name": "file.txt",
+            "@microsoft.graph.downloadUrl": canary,
+        }
+    )
+    assert canary not in repr(file)
+    assert canary not in repr([file])
+    error = SPAmbiguousWriteError(canary)
+    assert canary not in repr(error) and canary not in str(error)
+    assert error.upload_url == canary
+
     source = (Path(__file__).parents[1] / "sharepoint_manager/core.py").read_text()
     for expression in (
         'logger.info("Uploading file %s',

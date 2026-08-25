@@ -179,7 +179,7 @@ class SPFolder(SPObject):
 
 @dataclass
 class SPFile(SPObject):
-    download_url: str = ""
+    download_url: str = field(default="", repr=False)
     file: dict[str, Any] = field(default_factory=dict)
 
     @property
