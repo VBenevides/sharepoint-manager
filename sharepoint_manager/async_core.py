@@ -62,6 +62,15 @@ class AsyncSharepointManager:
     The HTTP client is injectable for tests and custom transports. When it is
     omitted, ``httpx.AsyncClient`` is loaded lazily, keeping package import
     independent from the optional transport until the async client is used.
+
+    Examples
+    --------
+    >>> async def transfer(provider, file_url, destination):
+    ...     async with AsyncSharepointManager(
+    ...         "https://tenant.sharepoint.com/sites/demo",
+    ...         token_provider=provider,
+    ...     ) as manager:
+    ...         await manager.download_file_from_url(file_url, destination)
     """
 
     def __init__(

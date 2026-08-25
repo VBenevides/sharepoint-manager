@@ -7,9 +7,14 @@ from urllib.parse import quote
 
 
 class QuickXorHash:
-    """Hash algorithm used by Microsoft Graph for hashing file contents for SharePoint and OneDrive.
+    """Microsoft Graph's 160-bit QuickXorHash implementation.
 
-    It can be used to check if a local version of a file is the same as the version in SharePoint without downloading the file, by comparing the hash of the local file with the hash provided by Microsoft Graph in the file metadata.
+    Examples
+    --------
+    >>> digest = QuickXorHash()
+    >>> digest.update(b"content")
+    >>> len(digest.digest())
+    20
     """
 
     _MASK_160 = (1 << 160) - 1

@@ -26,7 +26,29 @@ class TokenProvider(Protocol):
 
 @dataclass(frozen=True)
 class OperationPolicy:
-    """Finite resource and retry budgets for one manager."""
+    """Finite resource and retry budgets for one manager.
+
+    Parameters
+    ----------
+    max_file_bytes : int, default=10 GiB
+        Maximum size of one file transfer.
+    max_total_bytes : int, default=100 GiB
+        Cumulative byte budget for one operation.
+    max_items : int, default=100_000
+        Maximum number of transferred items.
+    max_depth : int, default=64
+        Maximum recursive folder depth.
+    max_concurrency : int, default=1
+        Number of concurrent transport requests.
+    wall_clock_seconds : float, default=3600.0
+        Operation deadline.
+
+    Examples
+    --------
+    >>> policy = OperationPolicy(max_concurrency=2, max_depth=8)
+    >>> policy.max_concurrency
+    2
+    """
 
     max_file_bytes: int = 10 * 1024**3
     max_total_bytes: int = 100 * 1024**3
@@ -292,7 +314,25 @@ class SPFile(SPObject):
 
 @dataclass(frozen=True)
 class SPDeletedItem:
-    """A Graph delta tombstone preserved without a follow-up fetch."""
+    """A Graph delta tombstone preserved without a follow-up fetch.
+
+    Parameters
+    ----------
+    id : str
+        Deleted item identifier.
+    name : str, default=""
+        Last known item name.
+    parent_reference : dict[str, Any], default_factory=dict
+        Last known parent metadata.
+    metadata : dict[str, Any], default_factory=dict
+        Original Graph payload.
+
+    Examples
+    --------
+    >>> item = SPDeletedItem.from_dict({"id": "deleted"})
+    >>> item.id
+    'deleted'
+    """
 
     id: str
     name: str = ""
@@ -323,7 +363,15 @@ class SPDeletedItem:
 
 @dataclass(frozen=True)
 class SPCollectionPage:
-    """One lazy Graph collection page."""
+    """One lazy Graph collection page.
+
+    Parameters
+    ----------
+    items : tuple[dict[str, Any], ...]
+        Items returned by Graph.
+    next_link : str, optional
+        Validated link for the next page.
+    """
 
     items: tuple[dict[str, Any], ...]
     next_link: str | None = None
@@ -331,7 +379,21 @@ class SPCollectionPage:
 
 @dataclass(frozen=True)
 class SPDeltaPage:
-    """One lazy delta page and its caller-owned checkpoint links."""
+    """One lazy delta page and its caller-owned checkpoint links.
+
+    Parameters
+    ----------
+    files : tuple[SPFile, ...], default=()
+        Changed files.
+    folders : tuple[SPFolder, ...], default=()
+        Changed folders.
+    deleted : tuple[SPDeletedItem, ...], default=()
+        Deletion tombstones.
+    next_link : str, optional
+        Validated continuation link.
+    delta_link : str, optional
+        Validated checkpoint link supplied when synchronization is complete.
+    """
 
     files: tuple[SPFile, ...] = ()
     folders: tuple[SPFolder, ...] = ()
