@@ -237,16 +237,44 @@ class SharepointManagerBase:
                     "expires_in": max(expires_on - now, 60) if expires_on else 3600,
                 }
             elif isinstance(self.ca, PublicClientApplication):
-                warnings.warn(
-                    "UserDelegatedCredential/ROPC is deprecated; inject a delegated token provider",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                result = self.ca.acquire_token_by_username_password(
-                    username=self.credentials.username,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-                    password=self.credentials.password,  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-                    scopes=[f"https://{self.graph_host}/.default"],
-                )
+                scopes = [f"https://{self.graph_host}/.default"]
+                result = None
+                if getattr(self, "_account", None) is None:
+                    accounts = self.ca.get_accounts(username=self._username)
+                    self._account = accounts[0] if accounts else None
+                if self._account is not None:
+                    result = self.ca.acquire_token_silent(
+                        scopes=scopes, account=self._account
+                    )
+                    if isinstance(result, dict) and "access_token" in result:
+                        self._password = None
+                        self.credentials = None
+                    else:
+                        result = None
+                if not isinstance(result, dict) or "access_token" not in result:
+                    if not self._warned_password_auth:
+                        warnings.warn(
+                            "Username/password authentication is deprecated and not recommended; "
+                            "ROPC does not support MFA or Conditional Access, and the password "
+                            "is used only for initial token bootstrap.",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                        self._warned_password_auth = True
+                    if self._password is None:
+                        raise SPAuthenticationError(
+                            "Silent authentication failed; credentials must be supplied again"
+                        )
+                    result = self.ca.acquire_token_by_username_password(
+                        username=self._username,
+                        password=self._password,
+                        scopes=scopes,
+                    )
+                    if isinstance(result, dict) and "access_token" in result:
+                        self._password = None
+                        self.credentials = None
+                        accounts = self.ca.get_accounts(username=self._username)
+                        self._account = accounts[0] if accounts else None
             else:
                 result = self.ca.acquire_token_for_client(
                     scopes=[f"https://{self.graph_host}/.default"]
@@ -670,6 +698,11 @@ class SharepointManager(SharepointManagerBase):
         self._token_provider = token_provider
         self.telemetry = telemetry
         self._correlation_id = uuid4().hex
+        self._user_credentials = isinstance(credentials, UserDelegatedCredential)
+        self._username = credentials.username if self._user_credentials else None
+        self._password = credentials.password if self._user_credentials else None
+        self._account = None
+        self._warned_password_auth = False
 
         self.url: str = sharepoint_site_url
         if "/teams/" in parsed_site_url.path:
@@ -698,11 +731,6 @@ class SharepointManager(SharepointManagerBase):
                 authority=f"https://login.microsoftonline.com/{self.tenant_id}",
             )
         else:
-            warnings.warn(
-                "UserDelegatedCredential is deprecated; use an injected delegated token provider",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             self.ca = PublicClientApplication(
                 client_id=credentials.client_id,
                 authority=f"https://login.microsoftonline.com/{self.tenant_id}",
@@ -732,6 +760,11 @@ class SharepointManager(SharepointManagerBase):
             if getattr(self, "_closed", False):
                 return
             self._closed = True
+            self._cached_token = ""
+            self._cached_token_expiry = 0
+            self._password = None
+            self._account = None
+            self.credentials = None
             provider = getattr(self, "_token_provider", None)
             if provider is not None and hasattr(provider, "close"):
                 provider.close()

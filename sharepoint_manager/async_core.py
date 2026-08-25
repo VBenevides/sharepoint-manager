@@ -525,6 +525,7 @@ class AsyncSharepointManager:
         self._cached_token = ""
         self._cached_token_expiry = 0
         self._password = None
+        self.credentials = None
         self._account = None
         self._msal_client = None
         if self._owns_client and self._client is not None:
