@@ -9,7 +9,7 @@ def main() -> None:
         'tags: ["v*.*.*"]',
         "environment: release",
         "id-token: write",
-        "requirements-build.txt",
+        'python -m pip install ".[dev]"',
         'test "$version" = "$(tr -d',
         "twine check --strict",
         "cyclonedx-py",

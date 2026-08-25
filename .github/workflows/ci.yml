@@ -25,12 +25,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install ".[dev]"
           if [ "${{ matrix.dependencies }}" = minimum ]; then
-            python -m pip install "msal==1.28.0" "requests==2.31.0"
-          else
-            python -m pip install "msal>=1.28,<2" "requests>=2.31,<3"
+            python -m pip install --force-reinstall "httpx==0.27.0" "msal==1.28.0" "requests==2.31.0"
           fi
-          python -m pip install ruff==0.12.10 pyright==1.1.390
       - name: Compile and run focused checks
         run: |
           python -m compileall -q sharepoint_manager verification
@@ -54,9 +52,7 @@ jobs:
         with:
           python-version: "3.14"
       - name: Install build and audit tools
-        run: |
-          python -m pip install -r requirements-build.txt
-          python -m pip install pip-audit==2.9.0 pip-licenses==5.0.0 cyclonedx-bom==7.1.0 twine==6.1.0
+        run: python -m pip install ".[dev]"
       - name: Build
         run: python -m build --sdist --wheel
       - name: Install and inspect wheel

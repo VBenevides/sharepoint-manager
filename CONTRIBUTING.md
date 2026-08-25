@@ -1,8 +1,9 @@
 # Contributing
 
-Use Python 3.10 or newer. Install runtime and build dependencies, then run:
+Use Python 3.10 or newer. Install the development extra, then run:
 
 ```bash
+python -m pip install -e ".[dev]"
 python verification/run_core_checks.py
 python -m compileall -q sharepoint_manager verification
 ruff format --check verification sharepoint_manager/__init__.py sharepoint_manager/dataclasses.py sharepoint_manager/exceptions.py sharepoint_manager/utils.py
