@@ -320,7 +320,7 @@ class AsyncSharepointManager:
                 response = await asyncio.wait_for(
                     self._request(method, url, **request_kwargs), remaining
                 )
-            except TimeoutError as exc:
+            except asyncio.TimeoutError as exc:
                 raise SPDeadlineExceeded(
                     "Graph request deadline exceeded", retryable=True
                 ) from exc
