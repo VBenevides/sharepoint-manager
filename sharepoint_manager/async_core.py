@@ -62,6 +62,15 @@ class AsyncSharepointManager:
     The HTTP client is injectable for tests and custom transports. When it is
     omitted, ``httpx.AsyncClient`` is loaded lazily, keeping package import
     independent from the optional transport until the async client is used.
+
+    Examples
+    --------
+    >>> async def transfer(provider, file_url, destination):
+    ...     async with AsyncSharepointManager(
+    ...         "https://tenant.sharepoint.com/sites/demo",
+    ...         token_provider=provider,
+    ...     ) as manager:
+    ...         await manager.download_file_from_url(file_url, destination)
     """
 
     def __init__(
@@ -71,10 +80,32 @@ class AsyncSharepointManager:
         *,
         token_provider: TokenProvider | None = None,
         graph_host: str = "graph.microsoft.com",
+        tenant_id: str | None = None,
         policy: OperationPolicy | None = None,
         client: Any | None = None,
         telemetry: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
+        """Initialize an async manager for one SharePoint site.
+
+        Parameters
+        ----------
+        sharepoint_site_url : str
+            Approved SharePoint site URL.
+        credentials : ClientCredential or UserDelegatedCredential, optional
+            MSAL credential. Supply ``tenant_id`` with credential-based auth.
+        token_provider : TokenProvider, optional
+            Injected provider used instead of MSAL.
+        graph_host : str, default="graph.microsoft.com"
+            Approved Microsoft Graph host.
+        tenant_id : str, optional
+            Tenant name or GUID used in the MSAL authority.
+        policy : OperationPolicy, optional
+            Transfer budgets and retry limits.
+        client : object, optional
+            Injected async HTTP client for tests or custom transports.
+        telemetry : callable, optional
+            Best-effort event callback.
+        """
         SharepointManagerBase._validate_sharepoint_url(sharepoint_site_url)
         graph_host = graph_host.lower().rstrip(".")
         if graph_host not in GRAPH_HOSTS:
@@ -83,9 +114,16 @@ class AsyncSharepointManager:
             )
         if credentials is None and token_provider is None:
             raise ValueError("credentials or token_provider is required")
+        if tenant_id is not None:
+            tenant_id = tenant_id.strip()
+            if not tenant_id or "/" in tenant_id or "\\" in tenant_id:
+                raise SPValidationError("tenant_id must be a tenant name or GUID")
+        if credentials is not None and token_provider is None and tenant_id is None:
+            raise ValueError("tenant_id is required when credentials are used")
 
         self.sharepoint_site_url = sharepoint_site_url
         self.graph_host = graph_host
+        self.tenant_id = tenant_id
         self._graph_base_url = f"https://{graph_host}/v1.0"
         self.policy = policy or OperationPolicy()
         self.credentials = credentials
@@ -183,12 +221,7 @@ class AsyncSharepointManager:
                     "expires_in": max(expires_on - now, 60) if expires_on else 3600,
                 }
             if not isinstance(result, dict) or "access_token" not in result:
-                detail = (
-                    result.get("error_description", "Authentication failed")
-                    if isinstance(result, dict)
-                    else "Authentication failed"
-                )
-                raise SPAuthenticationError(str(detail))
+                raise SPAuthenticationError("Authentication failed")
             self._cached_token = str(result["access_token"])
             expires_on = int(result.get("expires_on", 0) or 0)
             if not expires_on:
@@ -209,12 +242,12 @@ class AsyncSharepointManager:
                 self._msal_client = ConfidentialClientApplication(
                     self.credentials.client_id,
                     client_credential=self.credentials.client_secret,
-                    authority="https://login.microsoftonline.com/common",
+                    authority=f"https://login.microsoftonline.com/{self.tenant_id}",
                 )
             elif self._user_credentials:
                 self._msal_client = PublicClientApplication(
                     self.credentials.client_id,
-                    authority="https://login.microsoftonline.com/common",
+                    authority=f"https://login.microsoftonline.com/{self.tenant_id}",
                 )
             else:
                 raise SPAuthenticationError("Unsupported credentials")
@@ -279,7 +312,17 @@ class AsyncSharepointManager:
         kwargs.setdefault("timeout", self.policy.wall_clock_seconds)
         async with self._request_gate:
             started = time.monotonic()
-            response = await (await self._get_client()).request(method, url, **kwargs)
+            try:
+                response = await (await self._get_client()).request(
+                    method, url, **kwargs
+                )
+            except Exception:  # noqa: BLE001
+                message = (
+                    "Capability request failed"
+                    if not authenticated
+                    else "Graph request failed"
+                )
+                raise SPGraphError(message) from None
             if time.monotonic() - started > self.policy.wall_clock_seconds:
                 request_id = response.headers.get("request-id") or response.headers.get(
                     "client-request-id"
@@ -373,10 +416,7 @@ class AsyncSharepointManager:
         status = int(response.status_code)
         if status < 400:
             return
-        if status == 401:
-            error_type = SPAuthenticationError
-            message = "Graph authentication failed"
-        elif status == 403:
+        if status in {401, 403}:
             error_type = SPAuthorizationError
             message = "Graph resource request failed"
         elif status == 404:
@@ -576,24 +616,34 @@ class AsyncSharepointManager:
             client = await self._get_client()
             if hasattr(client, "stream"):
                 async with self._request_gate:
-                    response_context = client.stream("GET", item.download_url)
-                    async with response_context as response:
-                        self._raise_for_status(response)
-                        chunks: AsyncIterator[bytes] = response.aiter_bytes(
-                            _DOWNLOAD_CHUNK_SIZE
-                        )
-                        with os.fdopen(fd, "wb") as output:
-                            fd = None
-                            async for chunk in chunks:
-                                await self._consume_chunk(
-                                    output,
-                                    chunk,
-                                    digest,
-                                    budget,
-                                    downloaded,
-                                    int(item.size),
-                                )
-                                downloaded += len(chunk)
+                    try:
+                        response_context = client.stream("GET", item.download_url)
+                        async with response_context as response:
+                            self._raise_for_status(response)
+                            chunks: AsyncIterator[bytes] = response.aiter_bytes(
+                                _DOWNLOAD_CHUNK_SIZE
+                            )
+                            with os.fdopen(fd, "wb") as output:
+                                fd = None
+                                async for chunk in chunks:
+                                    await self._consume_chunk(
+                                        output,
+                                        chunk,
+                                        digest,
+                                        budget,
+                                        downloaded,
+                                        int(item.size),
+                                    )
+                                    downloaded += len(chunk)
+                    except (
+                        OSError,
+                        SPValidationError,
+                        SPFileIntegrityError,
+                        SPGraphError,
+                    ):
+                        raise
+                    except Exception:  # noqa: BLE001
+                        raise SPGraphError("Capability request failed") from None
             else:
                 response = await self._request(
                     "GET", item.download_url, authenticated=False
@@ -644,6 +694,20 @@ class AsyncSharepointManager:
         digest.update(chunk)
 
     async def download_file_from_url(self, url: str, destination: str) -> SPFile:
+        """Download one approved SharePoint file to an explicit path.
+
+        Parameters
+        ----------
+        url : str
+            SharePoint file URL.
+        destination : str
+            Destination filename. Parent directories are created as needed.
+
+        Returns
+        -------
+        SPFile
+            Downloaded file metadata.
+        """
         item = SPFile.from_dict(
             await self._get_item_from_url(url, not_found=SPFileNotFound)
         )
@@ -749,6 +813,20 @@ class AsyncSharepointManager:
     async def upload_file_to_folder_url(
         self, folder_url: str, local_path: str
     ) -> SPFile:
+        """Upload one local file below an approved folder URL.
+
+        Parameters
+        ----------
+        folder_url : str
+            Approved SharePoint folder URL.
+        local_path : str
+            Local regular-file path.
+
+        Returns
+        -------
+        SPFile
+            Uploaded file metadata.
+        """
         folder = SPFolder.from_dict(
             await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
         )
@@ -764,6 +842,15 @@ class AsyncSharepointManager:
         return result
 
     async def download_folder_from_url(self, folder_url: str, destination: str) -> None:
+        """Recursively download an approved folder to a local path.
+
+        Parameters
+        ----------
+        folder_url : str
+            Approved SharePoint folder URL.
+        destination : str
+            Local destination directory.
+        """
         folder = SPFolder.from_dict(
             await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
         )
@@ -790,6 +877,15 @@ class AsyncSharepointManager:
     async def upload_folder_to_folder_url(
         self, folder_url: str, local_path: str
     ) -> None:
+        """Recursively upload a local folder below a SharePoint folder.
+
+        Parameters
+        ----------
+        folder_url : str
+            Approved SharePoint destination folder URL.
+        local_path : str
+            Local regular-folder path.
+        """
         source = Path(local_path)
         if not source.is_dir() or source.is_symlink():
             raise SPValidationError("Upload source must be a regular folder")
@@ -817,6 +913,7 @@ class AsyncSharepointManager:
                 await self._upload_folder(child, entry, budget, depth + 1)
 
     async def close(self) -> None:
+        """Close the owned HTTP client and clear credential state."""
         if self._closed:
             return
         self._closed = True

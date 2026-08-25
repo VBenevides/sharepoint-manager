@@ -8,8 +8,11 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
+import requests
+
+from sharepoint_manager.core import SharepointManager
 from sharepoint_manager.dataclasses import SPFile
-from sharepoint_manager.exceptions import SPAmbiguousWriteError
+from sharepoint_manager.exceptions import SPAmbiguousWriteError, SPGraphError
 from sharepoint_manager.utils import safe_join
 
 
@@ -24,9 +27,32 @@ def main() -> None:
     )
     assert canary not in repr(file)
     assert canary not in repr([file])
-    error = SPAmbiguousWriteError(canary)
+    error = SPAmbiguousWriteError(canary, RuntimeError(canary))
     assert canary not in repr(error) and canary not in str(error)
-    assert error.upload_url == canary
+    assert not hasattr(error, "upload_url")
+    assert error.__cause__ is None
+
+    manager = object.__new__(SharepointManager)
+    manager.graph_host = "graph.microsoft.com"
+    manager.tenant_url = "https://tenant.sharepoint.com"
+    manager.policy = types.SimpleNamespace(
+        wall_clock_seconds=1,
+        max_retry_attempts=1,
+        allow_capability_redirects=False,
+        max_retry_after_seconds=1,
+    )
+    manager._closed = False
+    manager._emit_telemetry = lambda *args, **kwargs: None
+    manager._perform_request = lambda **kwargs: (_ for _ in ()).throw(
+        requests.RequestException(canary)
+    )
+    try:
+        manager._request("GET", canary, authenticated=False)
+    except SPGraphError as exc:
+        assert canary not in str(exc)
+        assert exc.__cause__ is None
+    else:
+        raise AssertionError("capability transport failure was not translated")
 
     source = (Path(__file__).parents[1] / "sharepoint_manager/core.py").read_text()
     for expression in (

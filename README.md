@@ -46,11 +46,16 @@ python -m build --sdist --wheel
 ## Quickstart
 
 ```python
+import os
+
 from sharepoint_manager import ClientCredential, SharepointManager
 
 manager = SharepointManager(
     "https://tenant.sharepoint.com/sites/example",
-    ClientCredential("client-id", "client-secret"),
+    ClientCredential(
+        os.environ["SP_CLIENT_ID"],
+        os.environ["SP_CLIENT_SECRET"],
+    ),
     document_folder_name="Documents",
 )
 
@@ -124,6 +129,17 @@ the original cause without embedding credentials, capability URLs, or names.
 Managers reuse one session and token provider and close owned resources through
 `close()` or context-manager exit. Request concurrency is bounded by the
 manager policy and each operation has an explicit target.
+The `sharepoint_manager` logger defaults to `WARNING`, so routine INFO-level
+`sharepoint event` records are quiet by default. Enable them explicitly when
+needed:
+
+```python
+import logging
+
+logging.getLogger("sharepoint_manager").setLevel(logging.INFO)
+```
+
+This logging threshold does not change the privacy-safe `telemetry` callback.
 Normal logs contain no bearer tokens, credentials, capability URLs, filenames,
 or permission members. Graph request IDs are retained as diagnostic fields.
 Pass `telemetry=callback` to receive privacy-safe `graph.request`, `graph.page`,

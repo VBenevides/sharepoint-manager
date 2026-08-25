@@ -7,19 +7,32 @@ from urllib.parse import quote
 
 
 class QuickXorHash:
-    """Hash algorithm used by Microsoft Graph for hashing file contents for SharePoint and OneDrive.
+    """Microsoft Graph's 160-bit QuickXorHash implementation.
 
-    It can be used to check if a local version of a file is the same as the version in SharePoint without downloading the file, by comparing the hash of the local file with the hash provided by Microsoft Graph in the file metadata.
+    Examples
+    --------
+    >>> digest = QuickXorHash()
+    >>> digest.update(b"content")
+    >>> len(digest.digest())
+    20
     """
 
     _MASK_160 = (1 << 160) - 1
 
     def __init__(self):
+        """Initialize an empty digest state."""
         self._state = 0
         self._lengthSoFar = 0
         self._shiftSoFar = 0
 
     def update(self, array: bytes):
+        """Add bytes to the rolling QuickXorHash state.
+
+        Parameters
+        ----------
+        array : bytes
+            Bytes to include in the digest.
+        """
         cbSize = len(array)
         if cbSize == 0:
             return
@@ -59,13 +72,16 @@ class QuickXorHash:
         self._shiftSoFar = shift
 
     def digest(self):
+        """Return the raw 20-byte digest."""
         final_state = self._state ^ (self._lengthSoFar << 96)
         return final_state.to_bytes(20, "little")
 
     def b64digest(self):
+        """Return the digest encoded as Graph's base64 value."""
         return base64.b64encode(self.digest()).decode("utf-8")
 
     def hexdigest(self):
+        """Return the digest encoded as lowercase hexadecimal."""
         return self.digest().hex()
 
 

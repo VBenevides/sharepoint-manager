@@ -48,8 +48,10 @@ replacements.
   replacement. Uploads use bounded retries and integrity-aware transfer
   handling.
 - Threaded sync operations use bounded parallelism with explicit operation
-  targets and coordinated shutdown. Async operations use non-blocking I/O and
-  cancellation-safe cleanup.
+  targets and coordinated shutdown. Async network requests use non-blocking
+  I/O and cancellation-safe cleanup; local filesystem reads, writes, and
+  hashing remain synchronous, so callers can offload a complete filesystem
+  workflow with `asyncio.to_thread` when event-loop latency matters.
 - Structured info/error logs and telemetry carry a redacted correlation ID,
   operation, elapsed time, status, and safe failure details.
 

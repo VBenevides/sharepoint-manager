@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.1.2] - 2026-08-25
+
+### Features
+
+- Added six offline examples covering client credentials, legacy delegated
+  credentials, synchronous and asynchronous filesystem workflows, and URL
+  workflows.
+- Added NumPy-style public API documentation, doctest/signature checks, and
+  sync/async contract checks.
+
+### Bugfixes
+
+- Made async credential authentication use an explicit tenant authority and
+  aligned async HTTP 401 handling with the synchronous client.
+- Enforced object download boundaries and redacted provider, capability URL,
+  and transport failure details from ordinary exceptions.
+- Removed redundant synchronous folder lookups while preserving concurrent
+  creator conflict recovery.
+- Enforced the reviewed license deny-list policy.
+
+### Other
+
+- Upgraded the isolated build frontend and clarified the async event-loop
+  contract for local filesystem work.
+- Replaced literal credential values in documentation with environment-backed
+  examples.
+
+### Breaking Changes
+
+- Async credential-based managers now require an explicit `tenant_id`; injected
+  token providers remain exempt.
+
 ## [0.1.1] - 2026-08-25
 
 ### Features

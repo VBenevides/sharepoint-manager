@@ -9,6 +9,7 @@ import types
 from math import ceil
 from pathlib import Path
 from typing import ClassVar
+from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 msal = types.ModuleType("msal")
@@ -41,6 +42,11 @@ class Client:
         if "/shares/" in url:
             share = url.split("/shares/", 1)[1].split("/", 1)[0]
             return Response(self.items[share])
+        if "/root:/" in url:
+            name = unquote(url.rsplit("/", 1)[-1])
+            return Response(
+                next(item for item in self.items.values() if item.get("name") == name)
+            )
         if "/download/" in url:
             return Response(content=self.payload)
         if method == "PUT" and url.endswith("/content"):
@@ -80,6 +86,7 @@ async def main() -> None:
     )
     manager._site_id = "site"
     manager._drive_id = "drive"
+    manager._drive_url_name = "Documents"
     with tempfile.TemporaryDirectory() as directory:
         folder_url = "https://tenant.sharepoint.com/sites/demo/Documents/folder"
         client.items[manager._share_id(folder_url)] = {

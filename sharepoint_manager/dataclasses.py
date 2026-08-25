@@ -10,12 +10,45 @@ class TokenProvider(Protocol):
     """Reusable token contract compatible with managed identity providers."""
 
     def get_token(self, scope: str) -> Any:
-        """Return a token string or an object with ``token``/``expires_on``."""
+        """Return a token string or an object with token metadata.
+
+        Parameters
+        ----------
+        scope : str
+            Resource scope requested by the manager.
+
+        Returns
+        -------
+        Any
+            Token string, mapping, or provider token object.
+        """
 
 
 @dataclass(frozen=True)
 class OperationPolicy:
-    """Finite resource and retry budgets for one manager."""
+    """Finite resource and retry budgets for one manager.
+
+    Parameters
+    ----------
+    max_file_bytes : int, default=10 GiB
+        Maximum size of one file transfer.
+    max_total_bytes : int, default=100 GiB
+        Cumulative byte budget for one operation.
+    max_items : int, default=100_000
+        Maximum number of transferred items.
+    max_depth : int, default=64
+        Maximum recursive folder depth.
+    max_concurrency : int, default=1
+        Number of concurrent transport requests.
+    wall_clock_seconds : float, default=3600.0
+        Operation deadline.
+
+    Examples
+    --------
+    >>> policy = OperationPolicy(max_concurrency=2, max_depth=8)
+    >>> policy.max_concurrency
+    2
+    """
 
     max_file_bytes: int = 10 * 1024**3
     max_total_bytes: int = 100 * 1024**3
@@ -71,6 +104,16 @@ class OperationPolicy:
 
 @dataclass(repr=False)
 class ClientCredential:
+    """Application credential for Microsoft Graph.
+
+    Parameters
+    ----------
+    client_id : str
+        Application (client) identifier.
+    client_secret : str
+        Application secret. It is excluded from representations.
+    """
+
     client_id: str
     client_secret: str = field(repr=False)
 
@@ -80,6 +123,18 @@ class ClientCredential:
 
 @dataclass(repr=False)
 class UserDelegatedCredential:
+    """Legacy username/password credential for delegated authentication.
+
+    Parameters
+    ----------
+    client_id : str
+        Public application identifier.
+    username : str
+        User principal name.
+    password : str
+        Password used only for the legacy ROPC bootstrap.
+    """
+
     client_id: str
     username: str
     password: str = field(repr=False)
@@ -93,6 +148,18 @@ class UserDelegatedCredential:
 
 @dataclass
 class SPObject:
+    """Common metadata returned for a Microsoft Graph drive item.
+
+    Parameters
+    ----------
+    id : str
+        Stable Graph item identifier.
+    name : str, default=""
+        Display name of the item.
+    parent_reference : dict[str, Any], default_factory=dict
+        Graph parent and boundary metadata.
+    """
+
     id: str
     name: str = ""
     created_datetime: str | None = None
@@ -130,15 +197,29 @@ def dataclass_from_dict(
 
 @dataclass
 class SPFolder(SPObject):
+    """SharePoint folder metadata and derived path helpers.
+
+    Parameters
+    ----------
+    id, name, parent_reference : object fields
+        Common :class:`SPObject` metadata.
+    context : str, default=""
+        Optional Graph context value.
+    folder : dict[str, Any], default_factory=dict
+        Raw Graph folder metadata.
+    """
+
     context: str = ""
     folder: dict[str, Any] = field(default_factory=dict)
 
     @property
     def child_count(self) -> int:
+        """Return Graph's reported number of direct children."""
         return self.folder.get("childCount", 0)
 
     @property
     def is_root(self) -> bool:
+        """Return whether this object represents the drive root."""
         return self.name == ""
 
     @property
@@ -172,6 +253,18 @@ class SPFolder(SPObject):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPFolder":
+        """Build folder metadata from a Graph response.
+
+        Parameters
+        ----------
+        data : dict[str, Any]
+            Graph drive-item payload.
+
+        Returns
+        -------
+        SPFolder
+            Normalized folder metadata.
+        """
         if "root" in data:
             data = {**data, "name": ""}
         return dataclass_from_dict(cls, data, {"@odata.context": "context"})
@@ -179,16 +272,41 @@ class SPFolder(SPObject):
 
 @dataclass
 class SPFile(SPObject):
+    """SharePoint file metadata and its capability download URL.
+
+    Parameters
+    ----------
+    id, name, parent_reference : object fields
+        Common :class:`SPObject` metadata.
+    download_url : str, default=""
+        Short-lived Graph download capability URL.
+    file : dict[str, Any], default_factory=dict
+        Raw Graph file metadata and hashes.
+    """
+
     download_url: str = field(default="", repr=False)
     file: dict[str, Any] = field(default_factory=dict)
 
     @property
     def quick_xor_hash(self) -> str:
+        """Return the Graph QuickXorHash value, or an empty string."""
         hashes = self.file.get("hashes", {})
         return str(hashes.get("quickXorHash", "")) if isinstance(hashes, dict) else ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPFile":
+        """Build file metadata from a Graph response.
+
+        Parameters
+        ----------
+        data : dict[str, Any]
+            Graph drive-item payload.
+
+        Returns
+        -------
+        SPFile
+            Normalized file metadata.
+        """
         return dataclass_from_dict(
             cls, data, {"@microsoft.graph.downloadUrl": "download_url"}
         )
@@ -196,7 +314,25 @@ class SPFile(SPObject):
 
 @dataclass(frozen=True)
 class SPDeletedItem:
-    """A Graph delta tombstone preserved without a follow-up fetch."""
+    """A Graph delta tombstone preserved without a follow-up fetch.
+
+    Parameters
+    ----------
+    id : str
+        Deleted item identifier.
+    name : str, default=""
+        Last known item name.
+    parent_reference : dict[str, Any], default_factory=dict
+        Last known parent metadata.
+    metadata : dict[str, Any], default_factory=dict
+        Original Graph payload.
+
+    Examples
+    --------
+    >>> item = SPDeletedItem.from_dict({"id": "deleted"})
+    >>> item.id
+    'deleted'
+    """
 
     id: str
     name: str = ""
@@ -205,6 +341,18 @@ class SPDeletedItem:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPDeletedItem":
+        """Build a delta tombstone from a Graph response.
+
+        Parameters
+        ----------
+        data : dict[str, Any]
+            Graph deleted-item payload.
+
+        Returns
+        -------
+        SPDeletedItem
+            Normalized tombstone metadata.
+        """
         return cls(
             id=str(data.get("id", "")),
             name=str(data.get("name", "")),
@@ -215,7 +363,15 @@ class SPDeletedItem:
 
 @dataclass(frozen=True)
 class SPCollectionPage:
-    """One lazy Graph collection page."""
+    """One lazy Graph collection page.
+
+    Parameters
+    ----------
+    items : tuple[dict[str, Any], ...]
+        Items returned by Graph.
+    next_link : str, optional
+        Validated link for the next page.
+    """
 
     items: tuple[dict[str, Any], ...]
     next_link: str | None = None
@@ -223,7 +379,21 @@ class SPCollectionPage:
 
 @dataclass(frozen=True)
 class SPDeltaPage:
-    """One lazy delta page and its caller-owned checkpoint links."""
+    """One lazy delta page and its caller-owned checkpoint links.
+
+    Parameters
+    ----------
+    files : tuple[SPFile, ...], default=()
+        Changed files.
+    folders : tuple[SPFolder, ...], default=()
+        Changed folders.
+    deleted : tuple[SPDeletedItem, ...], default=()
+        Deletion tombstones.
+    next_link : str, optional
+        Validated continuation link.
+    delta_link : str, optional
+        Validated checkpoint link supplied when synchronization is complete.
+    """
 
     files: tuple[SPFile, ...] = ()
     folders: tuple[SPFolder, ...] = ()
