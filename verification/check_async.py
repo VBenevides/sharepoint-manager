@@ -123,6 +123,7 @@ class StreamingClient(Client):
         super().__init__()
         self.stream_active = 0
         self.max_stream_active = 0
+        self.stream_started = asyncio.Event()
 
     def stream(self, method, url):
         client = self
@@ -133,6 +134,7 @@ class StreamingClient(Client):
                 client.max_stream_active = max(
                     client.max_stream_active, client.stream_active
                 )
+                client.stream_started.set()
                 return StreamingResponse(content=b"payload")
 
             async def __aexit__(self, exc_type, exc, traceback):
@@ -461,11 +463,12 @@ async def main() -> None:
 
         cancelled = Path(directory) / "cancelled.bin"
         try:
-            client.stream = StreamingClient().stream
+            cancellation_client = StreamingClient()
+            client.stream = cancellation_client.stream
             task = asyncio.create_task(
                 manager.download_file_from_url(file_url, str(cancelled))
             )
-            await asyncio.sleep(0)
+            await cancellation_client.stream_started.wait()
             task.cancel()
             try:
                 await task
