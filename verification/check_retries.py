@@ -1,4 +1,5 @@
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -36,6 +37,7 @@ def main() -> None:
     manager.tenant_url = "https://tenant.sharepoint.com"
     manager.policy = OperationPolicy(max_retry_attempts=3, max_retry_after_seconds=0.01)
     manager._session = session
+    manager._request_lock = threading.Lock()
     from sharepoint_manager import core
 
     original_sleep = core.time.sleep

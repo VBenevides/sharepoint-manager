@@ -1,4 +1,5 @@
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -30,6 +31,7 @@ def main() -> None:
     provider = Provider()
     manager = object.__new__(SharepointManager)
     manager.graph_host = "graph.microsoft.com"
+    manager._token_lock = threading.Lock()
     manager._token_provider = provider
     manager._session = types.SimpleNamespace(close=lambda: None)
     assert manager._ensure_token() == "injected-token"

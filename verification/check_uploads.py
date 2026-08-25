@@ -36,7 +36,7 @@ def manager_for(responses):
     manager.policy = OperationPolicy(
         max_file_bytes=100, max_total_bytes=100, max_disk_bytes=100
     )
-    manager.folder = SPFolder(id="folder", name="root")
+    manager._root_folder = SPFolder(id="folder", name="root")
     manager._hdr = lambda json_content=False: {"Authorization": "Bearer token"}
     manager._request = lambda method, url, **kwargs: responses.pop(0)
     return manager
@@ -52,7 +52,7 @@ def main() -> None:
                 Response(201, {"id": "empty", "name": "empty.txt", "file": {}}),
             ]
         )
-        result = manager.upload_file(str(empty), _folder=manager.folder)
+        result = manager.upload_file(str(empty), _folder=manager._root_folder)
         assert result.id == "empty"
 
         data = Path(directory) / "data.txt"
@@ -69,7 +69,7 @@ def main() -> None:
             calls.append((method, kwargs.get("data")))
             or original_request(method, url, **kwargs)
         )
-        assert manager.upload_file(str(data), _folder=manager.folder).id == "data"
+        assert manager.upload_file(str(data), _folder=manager._root_folder).id == "data"
         assert [call[0] for call in calls] == ["POST", "PUT", "PUT"]
 
         manager = manager_for(
@@ -81,7 +81,7 @@ def main() -> None:
             else Response(200, {"uploadUrl": "https://upload.sharepoint.com/session"})
         )
         try:
-            manager.upload_file(str(data), _folder=manager.folder)
+            manager.upload_file(str(data), _folder=manager._root_folder)
         except SPAmbiguousWriteError:
             pass
         else:

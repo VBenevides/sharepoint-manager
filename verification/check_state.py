@@ -16,16 +16,18 @@ def main() -> None:
     old = SPFolder(id="old")
     target = SPFolder(id="target")
     manager = object.__new__(SharepointManager)
-    manager.folder = old
+    manager._root_folder = old
     manager._resolve_folder = lambda path, create_folder=False: target
     manager._list_children = lambda folder: ({"file": SPFile(id="file")}, {})
     assert list(manager.list_files("Folder")) == ["file"]
-    assert manager.folder is old
+    assert manager._root_folder is old
     assert manager.list_folders("Folder") == {}
-    assert manager.folder is old
+    assert manager._root_folder is old
 
     source = (Path(__file__).parents[1] / "sharepoint_manager/core.py").read_text()
-    assert source.count("self.set_folder(") == 1
+    assert "def set_folder(" not in source
+    assert "def cwd(" not in source
+    assert "self.folder" not in source
 
 
 if __name__ == "__main__":

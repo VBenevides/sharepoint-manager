@@ -16,7 +16,6 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 from typing import Any, BinaryIO, Literal
 from urllib.parse import unquote, urlparse
@@ -107,26 +106,8 @@ class SharepointManagerBase:
     _session: requests.Session
     tenant_url: str
 
-    # Per-instance lock guarding the token cache. Initialised lazily so the
-    # base class works for subclasses that don't call ``__init__`` themselves.
+    # Per-instance locks guard the token cache and HTTP session.
     _token_lock: threading.Lock
-
-    def _get_token_lock(self) -> threading.Lock:
-        lock = getattr(self, "_token_lock", None)
-        if lock is None:
-            # Race here is benign – worst case two locks are created and the
-            # one stored last wins. The very first cached token write will
-            # still be observed by readers thanks to the GIL semantics.
-            lock = threading.Lock()
-            self._token_lock = lock
-        return lock
-
-    def _get_request_lock(self) -> threading.Lock:
-        lock = getattr(self, "_request_lock", None)
-        if lock is None:
-            lock = threading.Lock()
-            self._request_lock = lock
-        return lock
 
     def _emit_telemetry(self, event: str, **fields: Any) -> None:
         callback = getattr(self, "telemetry", None)
@@ -260,7 +241,7 @@ class SharepointManagerBase:
             return str(cached_token)
 
         # Slow path – only one thread per instance refreshes the token.
-        with self._get_token_lock():
+        with self._token_lock:
             # Re-check inside the lock so concurrent callers wait once and
             # then reuse the freshly cached token.
             now = int(time.time())
@@ -369,7 +350,7 @@ class SharepointManagerBase:
             request_started = time.monotonic()
             try:
                 # ponytail: one request lock; add per-session pooling only if measured throughput needs it.
-                with self._get_request_lock():
+                with self._request_lock:
                     resp = self._session.request(
                         method=method,
                         url=url,
@@ -705,6 +686,8 @@ class SharepointManager(SharepointManagerBase):
         self._owns_session = session is None
         self._closed = False
         self._close_lock = threading.Lock()
+        self._token_lock = threading.Lock()
+        self._request_lock = threading.Lock()
         self.credentials = credentials
         self._token_provider = token_provider
         self.telemetry = telemetry
@@ -755,7 +738,7 @@ class SharepointManager(SharepointManagerBase):
         self.relative_path_root: str = (
             f"{self.site_separator}{self.site_name}/{self.document_folder_name}"
         )
-        self.folder: SPFolder = self._get_folder("")
+        self._root_folder: SPFolder = self._get_folder("")
 
     # ----------------------------------------------------------
     # Lifecycle / debugging helpers
@@ -784,21 +767,6 @@ class SharepointManager(SharepointManagerBase):
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
-
-    @contextmanager
-    def cwd(self, sp_relative_folder_path: str, create_folder: bool = False):
-        """
-        Temporarily switch ``self.folder`` to ``sp_relative_folder_path``.
-
-        Restores the previous folder on exit, even on exceptions, so calls
-        nested inside the ``with`` block don't leak state to the caller.
-        """
-        previous = self.folder
-        try:
-            self.set_folder(sp_relative_folder_path, create_folder=create_folder)
-            yield self.folder
-        finally:
-            self.folder = previous
 
     # ----------------------------------------------------------
     # Direct URL methods (share URL)
@@ -1301,7 +1269,7 @@ class SharepointManager(SharepointManagerBase):
     def _get_file(self, filename: str, folder: SPFolder | None = None) -> SPFile:
         """Fetch a file directly under the current folder by name (O(1) lookup)."""
         drive_id = self._drive_id
-        folder_id = str((folder or self.folder).id)
+        folder_id = str((folder or self._root_folder).id)
         encoded_name = quote_segment(filename)
         url = f"{self._graph_base_url}/drives/{drive_id}/items/{folder_id}:/{encoded_name}"
         r = self._request("GET", url, headers=self._hdr(), timeout=30)
@@ -1458,7 +1426,7 @@ class SharepointManager(SharepointManagerBase):
             folder = (
                 self._resolve_folder(sp_relative_folder_path)
                 if sp_relative_folder_path is not None
-                else self.folder
+                else self._root_folder
             )
             file_obj = self._get_file(file, folder)
         else:
@@ -1559,46 +1527,6 @@ class SharepointManager(SharepointManagerBase):
             raise RuntimeError("SP Folder was not resolved correctly")
         return folder_data
 
-    def set_folder(
-        self, sp_relative_folder_path: str, create_folder: bool = False
-    ) -> SPFolder:
-        """
-        Set the current working folder.
-
-
-        Parameters
-        ----------
-        sp_relative_folder_path : str
-            Relative path within the document library.
-        create_folder : bool, optional
-            If True, create the folder (and ancestors) if it does not exist.
-
-
-        Returns
-        -------
-        SPFolder
-            The set folder object.
-
-
-        Raises
-        ------
-        SPFolderNotFound
-            If the folder does not exist and `create_folder` is False.
-
-
-        Examples
-        --------
-        >>> manager = SharepointManager(...)
-        >>> try:
-        >>>     manager.set_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", create_folder = False)
-        >>> except SPFolderNotFound:
-        >>>     logging.info("Folder does not exist inside Sharepoint!")
-        >>> manager.set_folder(sp_relative_folder_path = "Folder1/Folder2/Folder3", create_folder = True) # Creates folder
-        """
-
-        self.folder = self._resolve_folder(sp_relative_folder_path, create_folder)
-        return self.folder
-
     def _list_children(
         self, folder: SPFolder | None = None
     ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
@@ -1607,7 +1535,7 @@ class SharepointManager(SharepointManagerBase):
         Returns ``(files_by_name, folders_by_name)``. Saves a network round
         trip versus calling :meth:`list_files` and :meth:`list_folders`.
         """
-        target = folder if folder is not None else self.folder
+        target = folder if folder is not None else self._root_folder
         drive_id = self._drive_id
         url = f"{self._graph_base_url}/drives/{drive_id}/items/{target.id}/children"
         files: dict[str, SPFile] = {}
@@ -1642,13 +1570,13 @@ class SharepointManager(SharepointManagerBase):
         Examples
         --------
         >>> manager = SharepointManager(...)
-        >>> files = manager.list_files(sp_relative_folder_path = "Folder1/Folder2/Folder3") # Changes self.folder and lists the files
+        >>> files = manager.list_files(sp_relative_folder_path = "Folder1/Folder2/Folder3")
         """
 
         target = (
             self._resolve_folder(sp_relative_folder_path)
             if sp_relative_folder_path is not None
-            else self.folder
+            else self._root_folder
         )
         files, _ = self._list_children(target)
         return files
@@ -1674,13 +1602,13 @@ class SharepointManager(SharepointManagerBase):
         Examples
         --------
         >>> manager = SharepointManager(...)
-        >>> folders = manager.list_folders(sp_relative_folder_path = "Folder1/Folder2/Folder3") # Changes self.folder and lists the folders
+        >>> folders = manager.list_folders(sp_relative_folder_path = "Folder1/Folder2/Folder3")
         """
 
         target = (
             self._resolve_folder(sp_relative_folder_path)
             if sp_relative_folder_path is not None
-            else self.folder
+            else self._root_folder
         )
         _, folders = self._list_children(target)
         return folders
@@ -1734,7 +1662,7 @@ class SharepointManager(SharepointManagerBase):
         target_folder = _folder or (
             self._resolve_folder(sp_relative_folder_path, create_folder=True)
             if sp_relative_folder_path is not None
-            else self.folder
+            else self._root_folder
         )
 
         file_name = get_filename(local_file_path)
@@ -1911,7 +1839,7 @@ class SharepointManager(SharepointManagerBase):
         base_folder = _folder or (
             self._resolve_folder(sp_relative_folder_path, create_folder=True)
             if sp_relative_folder_path is not None
-            else self.folder
+            else self._root_folder
         )
         base_relative = base_folder.relative_url
 
@@ -1986,7 +1914,7 @@ class SharepointManager(SharepointManagerBase):
             target_folder = _folder or (
                 self._resolve_folder(sp_relative_folder_path)
                 if sp_relative_folder_path is not None
-                else self.folder
+                else self._root_folder
             )
             file_obj = self._get_file(file, target_folder)
         else:
@@ -2043,7 +1971,7 @@ class SharepointManager(SharepointManagerBase):
         cur_folder = _folder or (
             self._resolve_folder(sp_relative_folder_path)
             if sp_relative_folder_path is not None
-            else self.folder
+            else self._root_folder
         )
         logger.info("Downloading folder")
         cur_folder_download_path = (
@@ -2103,7 +2031,7 @@ class SharepointManager(SharepointManagerBase):
             target_folder = (
                 self._resolve_folder(sp_relative_folder_path)
                 if sp_relative_folder_path is not None
-                else self.folder
+                else self._root_folder
             )
             file = self._get_file(file, target_folder)
         else:
@@ -2137,8 +2065,8 @@ class SharepointManager(SharepointManagerBase):
             If False (default), only empty folders are deleted. If True, delete regardless.
         sp_relative_folder_path : str, optional
             Relative path within the document library to scope the operation.
-            If provided, ``set_folder`` is invoked first; ``folder`` is then
-            interpreted relative to that location (when given as a ``str``).
+            If provided, ``folder`` is interpreted relative to that location
+            when given as a string.
 
 
         Raises
@@ -2163,7 +2091,7 @@ class SharepointManager(SharepointManagerBase):
         >>> manager.delete_folder("Folder1/Folder2/Folder3", force_delete=True)
         """
 
-        # Resolve the target folder without leaking ``self.folder`` mutation.
+        # Resolve the target folder without mutating manager state.
         if isinstance(folder, str):
             scope_path = (
                 f"{sp_relative_folder_path.rstrip('/')}/{folder.lstrip('/')}"

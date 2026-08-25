@@ -26,7 +26,7 @@ def main() -> None:
     manager.policy = OperationPolicy(
         max_file_bytes=100, max_total_bytes=100, max_disk_bytes=100
     )
-    manager.folder = types.SimpleNamespace(id="folder")
+    manager._root_folder = types.SimpleNamespace(id="folder")
     manager._check_file_budget = lambda size, destination=None: None
     manager._validate_file_boundary = lambda file: None
     downloaded = SPFile(id="file", name="file.txt", size=3)

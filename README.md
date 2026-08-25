@@ -1,13 +1,14 @@
 # SharePoint Manager
 
-Synchronous Python client for SharePoint through Microsoft Graph.
+Python clients for SharePoint through Microsoft Graph. Version 0.1.x is an
+intentional breaking release from 0.0.x; see the [0.1.x contract](docs/contract-0.1.md).
 
 ## Support contract
 
 - Python: 3.10–3.14
 - Runtime dependencies: `msal>=1.28,<2` and `requests>=2.31,<3`
-- API: synchronous, bounded by `OperationPolicy`, and typed with `SP*` exceptions
-- Version: read from `VERSION`; compatibility changes require a major release
+- API: explicit operation targets, bounded by `OperationPolicy`, and typed with `SP*` exceptions
+- Version: read from `VERSION`; 0.1.x does not preserve the 0.0.x API
 
 The client does not grant end-user permissions. Configure Entra application
 permissions outside this package. Prefer `Sites.Selected` and grant only the
@@ -46,13 +47,13 @@ finally:
 Use `with SharepointManager(...) as manager:` when the manager owns its HTTP
 session. Never commit client secrets. For managed identity, workload
 federation, certificates, or another provider, inject a `TokenProvider` with
-`get_token(scope)`; password-based `UserDelegatedCredential`/ROPC is deprecated.
+`get_token(scope)`. The explicit service-account workflow is documented in the
+[0.1.x contract](docs/contract-0.1.md) and warns when used.
 
 ## Operations and guarantees
 
-- Pass folder paths or objects to each operation. `set_folder` and `cwd` are
-  compatibility facades that mutate `manager.folder`; do not share them across
-  concurrent workers.
+- Pass an explicit folder path, URL, or object to each operation. Managers have
+  no mutable current-folder facade.
 - Downloads use a sibling temporary file, verify QuickXorHash when Graph
   supplies one, and replace the destination only after successful completion.
 - `upload_file` supports empty files and explicit `fail`, `replace`, or `rename`
@@ -83,8 +84,8 @@ the original cause without embedding credentials, capability URLs, or names.
 ## Lifecycle and observability
 
 Managers reuse one session and token provider and close owned resources through
-`close()` or context-manager exit. Request access is serialized per manager;
-use separate managers when independent connection concurrency is required.
+`close()` or context-manager exit. Request concurrency is bounded by the
+manager policy and each operation has an explicit target.
 Normal logs contain no bearer tokens, credentials, capability URLs, filenames,
 or permission members. Graph request IDs are retained as diagnostic fields.
 Pass `telemetry=callback` to receive privacy-safe `graph.request`, `graph.page`,
@@ -95,6 +96,6 @@ bytes, page/item, throttle, failure-class, and partial-outcome fields.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks and releases,
 [SECURITY.md](SECURITY.md) for security reporting, and
-[CHANGELOG.md](CHANGELOG.md) for version history. To migrate from ROPC,
-replace `UserDelegatedCredential` with an injected delegated provider or a
-service identity before the deprecation removal major release.
+[CHANGELOG.md](CHANGELOG.md) for version history. Use the explicit service-account
+flow described in the [0.1.x contract](docs/contract-0.1.md), or inject a
+delegated provider/service identity.
