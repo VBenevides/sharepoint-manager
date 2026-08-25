@@ -12,8 +12,12 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager import AsyncSharepointManager, OperationPolicy
-from sharepoint_manager.exceptions import SPUnauthorizedTarget, SPValidationError
+from sharepoint_manager import AsyncSharepointManager, OperationPolicy, async_core
+from sharepoint_manager.exceptions import (
+    SPDeadlineExceeded,
+    SPUnauthorizedTarget,
+    SPValidationError,
+)
 
 
 class Response:
@@ -116,6 +120,87 @@ async def main() -> None:
     client.children[
         "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
     ] = [file_payload]
+
+    class RetryResponse:
+        def __init__(self, status_code, retry_after="10"):
+            self.status_code = status_code
+            self.headers = {"Retry-After": retry_after}
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    retry_manager = manager
+    original_policy = retry_manager.policy
+    retry_manager.policy = OperationPolicy(
+        max_retry_attempts=3,
+        max_retry_after_seconds=0.01,
+        wall_clock_seconds=1,
+    )
+    original_request = retry_manager._request
+    original_sleep = async_core.asyncio.sleep
+    calls = []
+    sleeps = []
+    responses = [RetryResponse(503), RetryResponse(201)]
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, kwargs["timeout"]))
+        return responses.pop(0)
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    retry_manager._request = fake_request
+    async_core.asyncio.sleep = fake_sleep
+    post = await retry_manager._retry_request(
+        "POST", "https://graph.microsoft.com/v1.0/items"
+    )
+    assert post.status_code == 503
+    assert len(calls) == 1
+    calls.clear()
+    transient = RetryResponse(503)
+    responses[:] = [transient, RetryResponse(200)]
+    put = await retry_manager._retry_request(
+        "PUT", "https://graph.microsoft.com/v1.0/items"
+    )
+    assert put.status_code == 200
+    assert len(calls) == 2
+    assert sleeps and sleeps[0] <= 0.01
+    assert transient.closed
+    assert responses == []
+
+    responses[:] = [RetryResponse(503, retry_after="0"), RetryResponse(200)]
+    calls.clear()
+    immediate = await retry_manager._retry_request(
+        "PUT", "https://graph.microsoft.com/v1.0/items"
+    )
+    assert immediate.status_code == 200
+    assert len(calls) == 2
+
+    retry_manager.policy = OperationPolicy(
+        max_retry_attempts=3,
+        max_retry_after_seconds=0.01,
+        wall_clock_seconds=0.01,
+    )
+
+    async def slow_request(method, url, **kwargs):
+        await original_sleep(0.02)
+        return RetryResponse(503)
+
+    retry_manager._request = slow_request
+    started = time.monotonic()
+    try:
+        await retry_manager._retry_request(
+            "PUT", "https://graph.microsoft.com/v1.0/items"
+        )
+    except SPDeadlineExceeded:
+        assert time.monotonic() - started < 0.1
+    else:
+        raise AssertionError("retry deadline was not enforced")
+
+    retry_manager._request = original_request
+    retry_manager.policy = original_policy
+    async_core.asyncio.sleep = original_sleep
 
     foreign_url = "https://tenant.sharepoint.com/sites/demo/Other/foreign.bin"
     client.items[manager._share_id(foreign_url)] = {

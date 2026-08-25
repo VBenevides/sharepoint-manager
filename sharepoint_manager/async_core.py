@@ -45,6 +45,7 @@ from .utils import QuickXorHash, safe_join
 _CHUNK_SIZE = 20 * 327680
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
+_RETRY_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT"})
 logger = logging.getLogger(__name__)
 
 
@@ -285,6 +286,16 @@ class AsyncSharepointManager:
                 )
             return response
 
+    @staticmethod
+    async def _close_response(response: Any) -> None:
+        close = getattr(response, "aclose", None)
+        if close is None:
+            close = getattr(response, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
     async def _retry_request(self, method: str, url: str, **kwargs: Any) -> Any:
         deadline = time.monotonic() + self.policy.wall_clock_seconds
         for attempt in range(self.policy.max_retry_attempts):
@@ -293,13 +304,23 @@ class AsyncSharepointManager:
                 raise SPDeadlineExceeded(
                     "Graph request deadline exceeded", retryable=True
                 )
-            response = await self._request(method, url, **kwargs)
+            request_kwargs = dict(kwargs)
+            request_kwargs["timeout"] = min(
+                float(request_kwargs.get("timeout", remaining)), remaining
+            )
+            try:
+                response = await asyncio.wait_for(
+                    self._request(method, url, **request_kwargs), remaining
+                )
+            except TimeoutError as exc:
+                raise SPDeadlineExceeded(
+                    "Graph request deadline exceeded", retryable=True
+                ) from exc
             if time.monotonic() >= deadline:
                 request_id = response.headers.get("request-id") or response.headers.get(
                     "client-request-id"
                 )
-                if hasattr(response, "aclose"):
-                    await response.aclose()
+                await self._close_response(response)
                 raise SPDeadlineExceeded(
                     "Graph request deadline exceeded",
                     status=getattr(response, "status_code", None),
@@ -307,18 +328,31 @@ class AsyncSharepointManager:
                     retryable=True,
                 )
             if (
-                response.status_code not in _RETRY_STATUSES
+                method.upper() not in _RETRY_METHODS
+                or response.status_code not in _RETRY_STATUSES
                 or attempt + 1 >= self.policy.max_retry_attempts
             ):
                 return response
-            delay = min(2**attempt, self.policy.max_retry_after_seconds, remaining)
+            retry_after = response.headers.get("Retry-After")
+            try:
+                retry_after_seconds = float(retry_after)
+            except (TypeError, ValueError):
+                retry_after_seconds = 2**attempt
+            remaining = deadline - time.monotonic()
+            delay = min(
+                max(0.0, retry_after_seconds),
+                self.policy.max_retry_after_seconds,
+                max(0.0, remaining),
+            )
             if delay >= remaining:
+                await self._close_response(response)
                 raise SPDeadlineExceeded(
                     "Graph request deadline exceeded",
                     status=response.status_code,
                     request_id=response.headers.get("request-id"),
                     retryable=True,
                 )
+            await self._close_response(response)
             await asyncio.sleep(delay)
         raise SPGraphError("Request retry budget exhausted")
 
@@ -604,7 +638,7 @@ class AsyncSharepointManager:
         with path.open("rb") as source:  # noqa: ASYNC230
             while chunk := source.read(_CHUNK_SIZE):
                 end = offset + len(chunk) - 1
-                response = await self._request(
+                response = await self._retry_request(
                     "PUT",
                     upload_url,
                     authenticated=False,
