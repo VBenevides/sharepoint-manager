@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Any
+from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 from .core import SharepointManagerBase
@@ -35,6 +36,7 @@ from .exceptions import (
     SPGraphError,
     SPNotFoundError,
     SPThrottledError,
+    SPUnauthorizedTarget,
     SPValidationError,
 )
 from .urls import GRAPH_HOSTS, share_id, validate_capability_url, validate_graph_url
@@ -85,12 +87,15 @@ class AsyncSharepointManager:
         self._client = client
         self._owns_client = client is None
         self._token_lock = asyncio.Lock()
+        self._boundary_lock = asyncio.Lock()
         self._request_gate = asyncio.Semaphore(self.policy.max_concurrency)
         self._closed = False
         self._cached_token = ""
         self._cached_token_expiry = 0
         self._msal_client: Any | None = None
         self._account: Any | None = None
+        self._site_id: str | None = None
+        self._drive_id: str | None = None
         self._user_credentials = isinstance(credentials, UserDelegatedCredential)
         self._username = credentials.username if self._user_credentials else None
         self._password: str | None = (
@@ -366,16 +371,48 @@ class AsyncSharepointManager:
     def _share_id(url: str) -> str:
         return share_id(url)
 
+    async def _ensure_boundary(self) -> None:
+        if self._site_id and self._drive_id:
+            return
+        async with self._boundary_lock:
+            if self._site_id and self._drive_id:
+                return
+            parsed = urlsplit(self.sharepoint_site_url)
+            site_path = quote(parsed.path.rstrip("/"), safe="/")
+            response = await self._retry_request(
+                "GET",
+                f"{self._graph_base_url}/sites/{parsed.hostname}:{site_path}",
+            )
+            self._raise_for_status(response, not_found=SPFolderNotFound)
+            site_id = response.json().get("id")
+            if not site_id:
+                raise SPUnauthorizedTarget("Configured SharePoint site has no ID")
+            response = await self._retry_request(
+                "GET", f"{self._graph_base_url}/sites/{site_id}/drive"
+            )
+            self._raise_for_status(response, not_found=SPFolderNotFound)
+            drive_id = response.json().get("id")
+            if not drive_id:
+                raise SPUnauthorizedTarget("Configured SharePoint drive has no ID")
+            self._site_id = site_id
+            self._drive_id = drive_id
+
+    def _validate_boundary(self, item: dict[str, Any]) -> None:
+        SharepointManagerBase._validate_item_boundary(self, item)
+
     async def _get_item_from_url(
         self, url: str, *, not_found: type[SPNotFoundError] = SPNotFoundError
     ) -> dict[str, Any]:
         SharepointManagerBase._validate_sharepoint_url(url)
+        await self._ensure_boundary()
         response = await self._retry_request(
             "GET",
             f"https://{self.graph_host}/v1.0/shares/{self._share_id(url)}/driveItem",
         )
         self._raise_for_status(response, not_found=not_found)
-        return response.json()
+        item = response.json()
+        self._validate_boundary(item)
+        return item
 
     async def _children(
         self, folder: SPFolder, budget: dict[str, Any] | None = None
@@ -393,6 +430,7 @@ class AsyncSharepointManager:
         files: dict[str, SPFile] = {}
         folders: dict[str, SPFolder] = {}
         for item in response.json().get("value", []):
+            self._validate_boundary(item)
             if "file" in item:
                 file = SPFile.from_dict(item)
                 files[file.name] = file
@@ -508,7 +546,9 @@ class AsyncSharepointManager:
             },
         )
         self._raise_for_status(response)
-        return SPFolder.from_dict(response.json())
+        payload = response.json()
+        self._validate_boundary(payload)
+        return SPFolder.from_dict(payload)
 
     async def _upload_file(
         self,

@@ -13,6 +13,7 @@ msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
 from sharepoint_manager import AsyncSharepointManager, OperationPolicy
+from sharepoint_manager.exceptions import SPUnauthorizedTarget
 
 
 class Response:
@@ -89,6 +90,8 @@ async def main() -> None:
         policy=OperationPolicy(max_concurrency=2),
         client=client,
     )
+    manager._site_id = "site"
+    manager._drive_id = "drive"
     file_payload = {
         "id": "file",
         "name": "remote.bin",
@@ -114,6 +117,13 @@ async def main() -> None:
         "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
     ] = [file_payload]
 
+    foreign_url = "https://tenant.sharepoint.com/sites/demo/Other/foreign.bin"
+    client.items[manager._share_id(foreign_url)] = {
+        **file_payload,
+        "id": "foreign",
+        "parentReference": {"siteId": "site", "driveId": "foreign-drive"},
+    }
+
     with tempfile.TemporaryDirectory() as directory:
         first = Path(directory) / "one.bin"
         second = Path(directory) / "two.bin"
@@ -132,6 +142,15 @@ async def main() -> None:
 
         await manager.download_folder_from_url(folder_url, directory)
         assert (Path(directory) / "folder" / "remote.bin").read_bytes() == b"payload"
+
+        try:
+            await manager.download_file_from_url(
+                foreign_url, str(Path(directory) / "foreign.bin")
+            )
+        except SPUnauthorizedTarget:
+            pass
+        else:
+            raise AssertionError("async cross-drive item was accepted")
 
         local_folder = Path(directory) / "local-folder"
         local_folder.mkdir()
