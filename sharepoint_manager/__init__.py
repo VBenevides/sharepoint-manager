@@ -1,19 +1,74 @@
-__version__ = "0.0.8"
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
+try:
+    __version__ = version("sharepoint_manager")
+except PackageNotFoundError:
+    __version__ = (
+        Path(__file__)
+        .parents[1]
+        .joinpath("VERSION")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
 
 # Import core components
-from .exceptions import SPFileNotFound, SPFolderNotEmpty, SPFolderNotFound
-from .dataclasses import SPFile, SPFolder, ClientCredential, UserDelegatedCredential
+from .async_core import AsyncSharepointManager
 from .core import SharepointManager
+from .dataclasses import (
+    ClientCredential,
+    OperationPolicy,
+    SPCollectionPage,
+    SPDeletedItem,
+    SPDeltaPage,
+    SPFile,
+    SPFolder,
+    TokenProvider,
+    UserDelegatedCredential,
+)
+from .exceptions import (
+    SPAmbiguousWriteError,
+    SPAuthenticationError,
+    SPAuthorizationError,
+    SPConflictError,
+    SPDeadlineExceeded,
+    SPDriveNotFound,
+    SPFileIntegrityError,
+    SPFileNotFound,
+    SPFolderNotEmpty,
+    SPFolderNotFound,
+    SPGraphError,
+    SPNotFoundError,
+    SPThrottledError,
+    SPValidationError,
+)
 from .utils import QuickXorHash
 
 __all__ = [
-    "SharepointManager",
-    "SPFile",
-    "SPFolder",
+    "AsyncSharepointManager",
     "ClientCredential",
-    "UserDelegatedCredential",
+    "OperationPolicy",
+    "QuickXorHash",
+    "SPAmbiguousWriteError",
+    "SPAuthenticationError",
+    "SPAuthorizationError",
+    "SPCollectionPage",
+    "SPConflictError",
+    "SPDeadlineExceeded",
+    "SPDeletedItem",
+    "SPDeltaPage",
+    "SPDriveNotFound",
+    "SPFile",
+    "SPFileIntegrityError",
     "SPFileNotFound",
+    "SPFolder",
     "SPFolderNotEmpty",
     "SPFolderNotFound",
-    "QuickXorHash",
+    "SPGraphError",
+    "SPNotFoundError",
+    "SPThrottledError",
+    "SPValidationError",
+    "SharepointManager",
+    "TokenProvider",
+    "UserDelegatedCredential",
 ]

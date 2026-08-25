@@ -1,8 +1,9 @@
-import os
-import re
-import ntpath
-from urllib.parse import quote
 import base64
+import ntpath
+import os
+import posixpath
+import re
+from urllib.parse import quote
 
 
 class QuickXorHash:
@@ -70,7 +71,11 @@ class QuickXorHash:
 
 def camel_to_snake(name: str) -> str:
     s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
-    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower().replace("date_time", "datetime")
+    return (
+        re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1)
+        .lower()
+        .replace("date_time", "datetime")
+    )
 
 
 def get_filename(target_path: str) -> str:
@@ -123,23 +128,44 @@ def safe_join(base_dir: str, untrusted_name: str) -> str:
     ``base_dir``. Raises ``ValueError`` on any attempt to escape.
     """
     if not isinstance(untrusted_name, str):  # pyright: ignore[reportUnnecessaryIsInstance]
-        raise ValueError(f"Filename must be a string, got {type(untrusted_name)!r}")
+        raise ValueError("Filename must be a string")  # noqa: TRY004
 
     cleaned = untrusted_name.replace("\x00", "").strip()
     # Reduce to the basename so that "../etc" becomes "etc"
     cleaned = ntpath.basename(cleaned)
     cleaned = os.path.basename(cleaned)
-    if cleaned in ("", ".", "..") or cleaned.startswith("."):
-        # We allow names starting with "." (e.g. ".gitignore") explicitly:
-        if cleaned in ("", ".", ".."):
-            raise ValueError(f"Unsafe filename received from SharePoint: {untrusted_name!r}")
+    if cleaned in ("", ".", ".."):
+        raise ValueError("Unsafe filename received from SharePoint")
 
     base_real = os.path.realpath(base_dir)
     full = os.path.realpath(os.path.join(base_real, cleaned))
     # Allow the file to be exactly inside base_dir (not above it).
     if full != base_real and not full.startswith(base_real + os.sep):
-        raise ValueError(f"Path traversal blocked: {untrusted_name!r}")
+        raise ValueError("Path traversal blocked")
     return full
+
+
+def validate_archive_members(
+    members: list[tuple[str, int]], max_items: int, max_expanded_bytes: int
+) -> None:
+    """Reject archive traversal and expansion beyond the supplied budgets."""
+    if len(members) > max_items:
+        raise ValueError("Archive item budget exceeded")
+    expanded = 0
+    for name, size in members:
+        normalized = posixpath.normpath(name.replace("\\", "/"))
+        if (
+            not name
+            or "\x00" in name
+            or posixpath.isabs(normalized)
+            or normalized == ".."
+            or normalized.startswith("../")
+            or size < 0
+        ):
+            raise ValueError("Unsafe archive member")
+        expanded += size
+        if expanded > max_expanded_bytes:
+            raise ValueError("Archive expansion budget exceeded")
 
 
 def quote_path(path: str) -> str:

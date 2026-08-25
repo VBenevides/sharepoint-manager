@@ -1,7 +1,72 @@
-from dataclasses import dataclass, fields, field
-from typing import Any
+import math
+from dataclasses import dataclass, field, fields
+from typing import Any, Protocol
+from urllib.parse import unquote, urlsplit
 
 from .utils import camel_to_snake
+
+
+class TokenProvider(Protocol):
+    """Reusable token contract compatible with managed identity providers."""
+
+    def get_token(self, scope: str) -> Any:
+        """Return a token string or an object with ``token``/``expires_on``."""
+
+
+@dataclass(frozen=True)
+class OperationPolicy:
+    """Finite resource and retry budgets for one manager."""
+
+    max_file_bytes: int = 10 * 1024**3
+    max_total_bytes: int = 100 * 1024**3
+    max_disk_bytes: int = 100 * 1024**3
+    max_archive_bytes: int = 10 * 1024**3
+    max_expanded_bytes: int = 100 * 1024**3
+    max_items: int = 100_000
+    max_depth: int = 64
+    max_pages: int = 1_000
+    max_concurrency: int = 1
+    wall_clock_seconds: float = 3_600.0
+    max_retry_attempts: int = 5
+    max_retry_after_seconds: float = 60.0
+    allow_capability_redirects: bool = False
+    redact_logs: bool = True
+
+    def __post_init__(self) -> None:
+        integer_fields = (
+            "max_file_bytes",
+            "max_total_bytes",
+            "max_disk_bytes",
+            "max_archive_bytes",
+            "max_expanded_bytes",
+            "max_items",
+            "max_depth",
+            "max_pages",
+            "max_concurrency",
+            "max_retry_attempts",
+        )
+        for name in integer_fields:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        for name in ("wall_clock_seconds", "max_retry_after_seconds"):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a finite positive number")
+        if not isinstance(self.allow_capability_redirects, bool):
+            raise TypeError("allow_capability_redirects must be a boolean")
+        if not isinstance(self.redact_logs, bool):
+            raise TypeError("redact_logs must be a boolean")
+        if self.max_file_bytes > self.max_total_bytes:
+            raise ValueError("max_file_bytes cannot exceed max_total_bytes")
+        if self.max_file_bytes > self.max_disk_bytes:
+            raise ValueError("max_file_bytes cannot exceed max_disk_bytes")
+        if self.max_archive_bytes > self.max_expanded_bytes:
+            raise ValueError("max_archive_bytes cannot exceed max_expanded_bytes")
 
 
 @dataclass(repr=False)
@@ -43,7 +108,9 @@ class SPObject:
     e_tag: str = ""
 
 
-def dataclass_from_dict(cls, data: dict[str, Any], extra_mapping: dict[str, str] | None = None):
+def dataclass_from_dict(
+    cls, data: dict[str, Any], extra_mapping: dict[str, str] | None = None
+):
     valid_fields = {f.name for f in fields(cls)}
     # Work on a shallow copy to avoid mutating the caller's dict.
     working = dict(data)
@@ -81,8 +148,18 @@ class SPFolder(SPObject):
         We want to get everything after the documents folder: folder1/folder2
         """
 
-        # include "/" because root url ends with /documents_folder
-        parts = (self.web_url + "/").split("/")
+        parent_path = self.parent_reference.get("path", "")
+        if isinstance(parent_path, str) and "root:" in parent_path:
+            relative = parent_path.split("root:", 1)[1].strip("/")
+            parts = [unquote(part) for part in relative.split("/") if part]
+            if self.name:
+                parts.append(self.name)
+            return "/".join(parts)
+
+        # Fallback for older Graph payloads without parentReference.path.
+        parts = [
+            unquote(part) for part in urlsplit(self.web_url).path.split("/") if part
+        ]
         # skip sites, site_name, documents_folder
         try:
             id_start = parts.index("sites") + 3
@@ -91,10 +168,7 @@ class SPFolder(SPObject):
                 id_start = parts.index("teams") + 3
             except ValueError:
                 return ""
-        relative_url = "/".join(parts[id_start:])
-        if relative_url and relative_url[-1] == "/":
-            relative_url = relative_url[:-1]
-        return relative_url
+        return "/".join(parts[id_start:])
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPFolder":
@@ -105,9 +179,54 @@ class SPFolder(SPObject):
 
 @dataclass
 class SPFile(SPObject):
-    download_url: str = ""
+    download_url: str = field(default="", repr=False)
     file: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def quick_xor_hash(self) -> str:
+        hashes = self.file.get("hashes", {})
+        return str(hashes.get("quickXorHash", "")) if isinstance(hashes, dict) else ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SPFile":
-        return dataclass_from_dict(cls, data, {"@microsoft.graph.downloadUrl": "download_url"})
+        return dataclass_from_dict(
+            cls, data, {"@microsoft.graph.downloadUrl": "download_url"}
+        )
+
+
+@dataclass(frozen=True)
+class SPDeletedItem:
+    """A Graph delta tombstone preserved without a follow-up fetch."""
+
+    id: str
+    name: str = ""
+    parent_reference: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SPDeletedItem":
+        return cls(
+            id=str(data.get("id", "")),
+            name=str(data.get("name", "")),
+            parent_reference=dict(data.get("parentReference", {})),
+            metadata=dict(data),
+        )
+
+
+@dataclass(frozen=True)
+class SPCollectionPage:
+    """One lazy Graph collection page."""
+
+    items: tuple[dict[str, Any], ...]
+    next_link: str | None = None
+
+
+@dataclass(frozen=True)
+class SPDeltaPage:
+    """One lazy delta page and its caller-owned checkpoint links."""
+
+    files: tuple[SPFile, ...] = ()
+    folders: tuple[SPFolder, ...] = ()
+    deleted: tuple[SPDeletedItem, ...] = ()
+    next_link: str | None = None
+    delta_link: str | None = None

@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Python ${{ matrix.python }} / ${{ matrix.dependencies }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        dependencies: [minimum, latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[dev]"
+          if [ "${{ matrix.dependencies }}" = minimum ]; then
+            python -m pip install --force-reinstall "httpx==0.27.0" "msal==1.35.0" "requests==2.33.0"
+          fi
+      - name: Compile and run focused checks
+        run: |
+          python -m compileall -q sharepoint_manager verification tests
+          python -m unittest discover -s tests -v
+      - name: Dependency consistency
+        run: python -m pip check
+
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install ".[dev]"
+      - name: Format, lint, and type check
+        run: |
+          ruff format --check tests verification sharepoint_manager
+          ruff check
+          pyright sharepoint_manager
+
+  artifacts:
+    name: Build and inspect artifacts
+    runs-on: ubuntu-latest
+    needs: [checks, static]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Install build tools
+        run: python -m pip install ".[dev]"
+      - name: Build
+        run: python -m build --sdist --wheel
+      - name: Install and inspect wheel
+        run: |
+          python -m pip install dist/*.whl
+          python -m pip check
+          python -c "import sharepoint_manager; print(sharepoint_manager.__version__)"
+          twine check --strict dist/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-build
+          path: |
+            dist/*

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sharepoint_manager"
+dynamic = ["version"]
+description = "Library for interacting with SharePoint using Microsoft Graph API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Vinicius Benevides", email = "viniciusm.benevides@gmail.com"}]
+dependencies = ["httpx>=0.27,<1", "msal>=1.35,<2", "requests>=2.33,<3"]
+
+[project.optional-dependencies]
+dev = [
+    "build==1.3.0",
+    "cyclonedx-bom==7.1.0",
+    "pip-audit==2.10.1",
+    "pip-licenses==5.0.0",
+    "pyright==1.1.390",
+    "ruff==0.12.10",
+    "twine==6.1.0",
+]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
+
+[tool.setuptools.packages.find]
+include = ["sharepoint_manager*"]
+
+[tool.pyright]
+include = ["sharepoint_manager"]
+typeCheckingMode = "basic"
+reportMissingImports = "none"
+reportAttributeAccessIssue = "none"
+reportArgumentType = "none"
+reportOptionalMemberAccess = "none"
+
+[tool.ruff.lint.per-file-ignores]
+# Verification scripts install test doubles before importing the package.
+"verification/*.py" = ["E402"]
