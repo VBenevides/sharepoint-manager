@@ -128,16 +128,14 @@ def safe_join(base_dir: str, untrusted_name: str) -> str:
     ``base_dir``. Raises ``ValueError`` on any attempt to escape.
     """
     if not isinstance(untrusted_name, str):  # pyright: ignore[reportUnnecessaryIsInstance]
-        raise ValueError("Filename must be a string")
+        raise ValueError("Filename must be a string")  # noqa: TRY004
 
     cleaned = untrusted_name.replace("\x00", "").strip()
     # Reduce to the basename so that "../etc" becomes "etc"
     cleaned = ntpath.basename(cleaned)
     cleaned = os.path.basename(cleaned)
-    if cleaned in ("", ".", "..") or cleaned.startswith("."):
-        # We allow names starting with "." (e.g. ".gitignore") explicitly:
-        if cleaned in ("", ".", ".."):
-            raise ValueError("Unsafe filename received from SharePoint")
+    if cleaned in ("", ".", ".."):
+        raise ValueError("Unsafe filename received from SharePoint")
 
     base_real = os.path.realpath(base_dir)
     full = os.path.realpath(os.path.join(base_real, cleaned))

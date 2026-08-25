@@ -7,7 +7,7 @@ python -m pip install -e ".[dev]"
 python -m unittest discover -s tests -v
 python -m compileall -q sharepoint_manager verification tests
 ruff format --check tests verification sharepoint_manager
-ruff check --select E4,E7,E9,F --ignore E402 sharepoint_manager verification
+ruff check
 python -m build --sdist --wheel
 ```
 

@@ -3,6 +3,7 @@ import threading
 import time
 import types
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 msal = types.ModuleType("msal")
@@ -10,15 +11,15 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.core import SharepointManager
 from sharepoint_manager import core
+from sharepoint_manager.core import SharepointManager
 from sharepoint_manager.dataclasses import OperationPolicy
 from sharepoint_manager.exceptions import SPValidationError
 
 
 class Response:
     status_code = 200
-    headers = {}
+    headers: ClassVar[dict[str, str]] = {}
 
     def close(self):
         return None
@@ -84,7 +85,7 @@ def main() -> None:
                 "https://graph.microsoft.com/v1.0/items",
                 headers={"Authorization": "Bearer token"},
             ).close()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 
     threads = [threading.Thread(target=request) for _ in range(workers)]

@@ -2,7 +2,6 @@ import runpy
 import unittest
 from pathlib import Path
 
-
 CHECKS = sorted(Path(__file__).parents[1].joinpath("verification").glob("check_*.py"))
 
 

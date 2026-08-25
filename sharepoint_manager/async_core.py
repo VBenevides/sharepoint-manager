@@ -11,6 +11,7 @@ import time
 import warnings
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 from uuid import uuid4
 
@@ -38,7 +39,6 @@ from .exceptions import (
 )
 from .urls import GRAPH_HOSTS, share_id, validate_capability_url, validate_graph_url
 from .utils import QuickXorHash, safe_join
-
 
 _CHUNK_SIZE = 20 * 327680
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
@@ -138,7 +138,7 @@ class AsyncSharepointManager:
             return
         try:
             self.telemetry(record)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return
 
     async def _ensure_token(self) -> str:
@@ -463,8 +463,6 @@ class AsyncSharepointManager:
                     "Downloaded content failed integrity verification"
                 )
             os.replace(temporary, destination)
-        except asyncio.CancelledError:
-            raise
         finally:
             try:
                 os.unlink(temporary)
@@ -536,7 +534,8 @@ class AsyncSharepointManager:
         self._raise_for_status(session_response)
         upload_url = session_response.json()["uploadUrl"]
         offset = 0
-        with path.open("rb") as source:
+        response = None
+        with path.open("rb") as source:  # noqa: ASYNC230
             while chunk := source.read(_CHUNK_SIZE):
                 end = offset + len(chunk) - 1
                 response = await self._request(
@@ -551,7 +550,7 @@ class AsyncSharepointManager:
                 )
                 self._raise_for_status(response)
                 offset = end + 1
-        payload = response.json() if hasattr(response, "json") else {}
+        payload = response.json() if response is not None else {}
         return (
             SPFile.from_dict(payload)
             if payload.get("id")
@@ -641,8 +640,13 @@ class AsyncSharepointManager:
         if self._owns_client and self._client is not None:
             await self._client.aclose()
 
-    async def __aenter__(self) -> "AsyncSharepointManager":
+    async def __aenter__(self) -> AsyncSharepointManager:  # noqa: PYI034
         return self
 
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         await self.close()

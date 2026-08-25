@@ -28,8 +28,7 @@ class Response:
         return None
 
     def iter_content(self, chunk_size):
-        for chunk in self.chunks:
-            yield chunk
+        yield from self.chunks
         if self.fail:
             raise RuntimeError("stream interrupted")
 

@@ -17,7 +17,7 @@ def main() -> None:
     for kwargs in ({"allow_capability_redirects": 1}, {"redact_logs": "yes"}):
         try:
             OperationPolicy(**kwargs)
-        except ValueError:
+        except (TypeError, ValueError):
             pass
         else:
             raise AssertionError(kwargs)

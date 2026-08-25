@@ -9,8 +9,8 @@ except PackageNotFoundError:
     )
 
 # Import core components
-from .core import SharepointManager
 from .async_core import AsyncSharepointManager
+from .core import SharepointManager
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
@@ -41,8 +41,8 @@ from .exceptions import (
 from .utils import QuickXorHash
 
 __all__ = [
-    "ClientCredential",
     "AsyncSharepointManager",
+    "ClientCredential",
     "OperationPolicy",
     "QuickXorHash",
     "SPAmbiguousWriteError",

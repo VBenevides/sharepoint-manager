@@ -11,9 +11,8 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager.dataclasses import OperationPolicy
 from sharepoint_manager.core import SharepointManager
-from sharepoint_manager.dataclasses import SPFile, SPFolder
+from sharepoint_manager.dataclasses import OperationPolicy, SPFile, SPFolder
 from sharepoint_manager.exceptions import SPValidationError
 from sharepoint_manager.utils import validate_archive_members
 
@@ -28,7 +27,7 @@ def main() -> None:
     ):
         try:
             OperationPolicy(**kwargs)
-        except ValueError:
+        except (TypeError, ValueError):
             pass
         else:
             raise AssertionError(kwargs)

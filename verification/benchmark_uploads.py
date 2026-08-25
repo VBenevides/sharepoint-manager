@@ -1,8 +1,8 @@
 """Request-count benchmark for the small-file upload decision."""
 
-from math import ceil
 import sys
 import types
+from math import ceil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

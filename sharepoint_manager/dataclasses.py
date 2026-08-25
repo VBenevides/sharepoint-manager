@@ -58,9 +58,9 @@ class OperationPolicy:
             ):
                 raise ValueError(f"{name} must be a finite positive number")
         if not isinstance(self.allow_capability_redirects, bool):
-            raise ValueError("allow_capability_redirects must be a boolean")
+            raise TypeError("allow_capability_redirects must be a boolean")
         if not isinstance(self.redact_logs, bool):
-            raise ValueError("redact_logs must be a boolean")
+            raise TypeError("redact_logs must be a boolean")
         if self.max_file_bytes > self.max_total_bytes:
             raise ValueError("max_file_bytes cannot exceed max_total_bytes")
         if self.max_file_bytes > self.max_disk_bytes:

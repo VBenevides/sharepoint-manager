@@ -4,6 +4,7 @@ import sys
 import threading
 import types
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 msal = types.ModuleType("msal")
@@ -18,7 +19,7 @@ from sharepoint_manager.exceptions import SPAuthorizationError
 
 class Response:
     status_code = 200
-    headers = {"request-id": "request-a"}
+    headers: ClassVar[dict[str, str]] = {"request-id": "request-a"}
 
     def __init__(self, body=None, chunks=()):
         self.body = body or {}
@@ -110,7 +111,7 @@ def main() -> None:
         {"value": [{"id": "item-a"}]}
     )
     assert (
-        list(manager._paginate("https://graph.microsoft.com/v1.0/items"))[0]["id"]
+        next(manager._paginate("https://graph.microsoft.com/v1.0/items"))["id"]
         == "item-a"
     )
     page_event = next(event for event in events if event["event"] == "graph.page")

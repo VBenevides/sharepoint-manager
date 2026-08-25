@@ -51,6 +51,13 @@ from .exceptions import (
     SPUnauthorizedTarget,
     SPValidationError,
 )
+from .urls import (
+    GRAPH_HOSTS,
+    share_id,
+    validate_capability_url,
+    validate_graph_url,
+    validate_sharepoint_url,
+)
 from .utils import (
     QuickXorHash,
     get_filename,
@@ -59,13 +66,6 @@ from .utils import (
     quote_path,
     quote_segment,
     safe_join,
-)
-from .urls import (
-    GRAPH_HOSTS,
-    share_id,
-    validate_capability_url,
-    validate_graph_url,
-    validate_sharepoint_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -282,19 +282,19 @@ class SharepointManagerBase:
                     scopes=[f"https://{self.graph_host}/.default"]
                 )
 
-            if not isinstance(result, dict) or "access_token" not in result.keys():
+            if not isinstance(result, dict) or "access_token" not in result:
                 raise SPAuthenticationError("Authentication failed")
 
             token = str(result["access_token"])
             # Prefer 'expires_on' (epoch seconds as str) else compute from 'expires_in'
             try:
                 expires_on = int(result.get("expires_on", 0))
-            except Exception:
+            except (TypeError, ValueError):
                 expires_on = 0
             if not expires_on:
                 try:
                     expires_in = int(result.get("expires_in", 3600))
-                except Exception:
+                except (TypeError, ValueError):
                     expires_in = 3600
                 expires_on = now + max(expires_in, 60)
 
@@ -517,7 +517,7 @@ class SharepointManagerBase:
                 # connections back to the pool in CLOSE_WAIT.
                 try:
                     resp.close()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
                 if time.monotonic() >= deadline:
                     raise SPDeadlineExceeded(
@@ -544,7 +544,7 @@ class SharepointManagerBase:
         request_id = headers.get("request-id") or headers.get("client-request-id")
         try:
             response.raise_for_status()
-        except Exception as cause:
+        except requests.RequestException as cause:
             error = cause
         else:
             error = None
@@ -908,10 +908,10 @@ class SharepointManager(SharepointManagerBase):
         for session in sessions:
             try:
                 session.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
-    def __enter__(self) -> "SharepointManager":
+    def __enter__(self) -> "SharepointManager":  # noqa: PYI034
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -1785,7 +1785,7 @@ class SharepointManager(SharepointManagerBase):
             if upload_url is not None:
                 try:
                     self._request("DELETE", upload_url, timeout=30)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
             self._emit_telemetry(
                 "transfer",

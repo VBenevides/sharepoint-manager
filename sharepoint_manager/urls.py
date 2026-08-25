@@ -5,7 +5,6 @@ from urllib.parse import urlparse
 
 from .exceptions import SPValidationError
 
-
 GRAPH_HOSTS = frozenset(
     {
         "graph.microsoft.com",
