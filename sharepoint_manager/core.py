@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator
 from email.utils import parsedate_to_datetime
 from typing import Any, BinaryIO, Literal
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 import requests
 from msal import ConfidentialClientApplication, PublicClientApplication
@@ -110,10 +111,31 @@ class SharepointManagerBase:
     _token_lock: threading.Lock
 
     def _emit_telemetry(self, event: str, **fields: Any) -> None:
+        correlation_id = getattr(self, "_correlation_id", None)
+        if not correlation_id:
+            correlation_id = uuid4().hex
+            self._correlation_id = correlation_id
+        record = {
+            "event": event,
+            "correlation_id": correlation_id,
+            "operation": fields.pop("operation", event.rsplit(".", 1)[-1]),
+            "elapsed_ms": fields.pop("elapsed_ms", 0.0),
+            "status": fields.pop("status", None),
+            **fields,
+        }
+        failed = (
+            bool(record.get("failure_class"))
+            or record.get("outcome") == "failure"
+            or (isinstance(record["status"], int) and record["status"] >= 400)
+        )
+        logger.log(
+            logging.ERROR if failed else logging.INFO,
+            "sharepoint event",
+            extra={"sharepoint_event": record},
+        )
         callback = getattr(self, "telemetry", None)
         if not callable(callback):
             return
-        record = {"event": event, **fields}
         try:
             # ponytail: telemetry is best-effort; callback health must not affect transfers.
             callback(record)
@@ -452,6 +474,14 @@ class SharepointManagerBase:
             409: SPConflictError,
             429: SPThrottledError,
         }.get(status, SPGraphError)
+        self._emit_telemetry(
+            "graph.error",
+            operation="request",
+            status=status,
+            request_id=request_id,
+            failure_class=error_type.__name__,
+            retryable=status in _RETRY_STATUSES,
+        )
         raise error_type(
             "Graph request failed",
             status=status,
@@ -691,6 +721,7 @@ class SharepointManager(SharepointManagerBase):
         self.credentials = credentials
         self._token_provider = token_provider
         self.telemetry = telemetry
+        self._correlation_id = uuid4().hex
 
         self.url: str = sharepoint_site_url
         if "/teams/" in parsed_site_url.path:

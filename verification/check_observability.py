@@ -1,4 +1,5 @@
 import io
+import logging
 import sys
 import threading
 import types
@@ -12,6 +13,7 @@ sys.modules.setdefault("msal", msal)
 
 from sharepoint_manager.core import SharepointManager
 from sharepoint_manager.dataclasses import OperationPolicy, SPFile
+from sharepoint_manager.exceptions import SPAuthorizationError
 
 
 class Response:
@@ -46,6 +48,18 @@ class Session:
 
 def main() -> None:
     events = []
+    log_records = []
+
+    class Handler(logging.Handler):
+        def emit(self, record):
+            event = getattr(record, "sharepoint_event", None)
+            if event is not None:
+                log_records.append(event)
+
+    handler = Handler()
+    core_logger = logging.getLogger("sharepoint_manager.core")
+    core_logger.addHandler(handler)
+    core_logger.setLevel(logging.INFO)
     manager = object.__new__(SharepointManager)
     manager.graph_host = "graph.microsoft.com"
     manager.tenant_url = "https://tenant.sharepoint.com"
@@ -66,7 +80,30 @@ def main() -> None:
     request_event = next(event for event in events if event["event"] == "graph.request")
     assert request_event["status"] == 200
     assert request_event["request_id"] == "request-a"
+    assert request_event["operation"] == "request"
+    assert request_event["elapsed_ms"] >= 0
+    assert request_event["correlation_id"]
     assert "url" not in request_event and "secret-token" not in repr(request_event)
+    logged_request = next(
+        event for event in log_records if event["event"] == "graph.request"
+    )
+    assert logged_request["correlation_id"] == request_event["correlation_id"]
+
+    failed = Response()
+    failed.status_code = 403
+    failed.headers = {"request-id": "request-b"}
+    failed.raise_for_status = lambda: None
+    try:
+        manager._raise_for_status(failed)
+    except SPAuthorizationError:
+        pass
+    else:
+        raise AssertionError("HTTP failure was hidden")
+    error_event = next(event for event in events if event["event"] == "graph.error")
+    assert error_event["failure_class"] == "SPAuthorizationError"
+    assert error_event["correlation_id"] == request_event["correlation_id"]
+    assert any(event["event"] == "graph.error" for event in log_records)
+    core_logger.removeHandler(handler)
 
     manager._drive_id = "drive-a"
     manager._request = lambda method, url, **kwargs: Response(

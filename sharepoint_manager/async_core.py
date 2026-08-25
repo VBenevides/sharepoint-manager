@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import logging
 import os
 import tempfile
 import time
@@ -13,6 +14,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from .core import SharepointManagerBase
 from .dataclasses import (
@@ -47,6 +49,7 @@ _GRAPH_HOSTS = {
 _CHUNK_SIZE = 20 * 327680
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
+logger = logging.getLogger(__name__)
 
 
 class AsyncSharepointManager:
@@ -84,6 +87,7 @@ class AsyncSharepointManager:
         self.credentials = credentials
         self._token_provider = token_provider
         self.telemetry = telemetry
+        self._correlation_id = uuid4().hex
         self._client = client
         self._owns_client = client is None
         self._token_lock = asyncio.Lock()
@@ -141,10 +145,28 @@ class AsyncSharepointManager:
             )
 
     def _emit(self, event: str, **fields: Any) -> None:
+        record = {
+            "event": event,
+            "correlation_id": self._correlation_id,
+            "operation": fields.pop("operation", event.rsplit(".", 1)[-1]),
+            "elapsed_ms": fields.pop("elapsed_ms", 0.0),
+            "status": fields.pop("status", None),
+            **fields,
+        }
+        failed = (
+            bool(record.get("failure_class"))
+            or record.get("outcome") == "failure"
+            or (isinstance(record["status"], int) and record["status"] >= 400)
+        )
+        logger.log(
+            logging.ERROR if failed else logging.INFO,
+            "sharepoint event",
+            extra={"sharepoint_event": record},
+        )
         if not callable(self.telemetry):
             return
         try:
-            self.telemetry({"event": event, **fields})
+            self.telemetry(record)
         except Exception:
             return
 
@@ -281,25 +303,34 @@ class AsyncSharepointManager:
             await asyncio.sleep(min(2**attempt, self.policy.max_retry_after_seconds))
         raise SPGraphError("Request retry budget exhausted")
 
-    @staticmethod
-    def _raise_for_status(response: Any) -> None:
+    def _raise_for_status(self, response: Any) -> None:
         status = int(response.status_code)
         if status < 400:
             return
         if status == 401:
-            raise SPAuthenticationError("Graph authentication failed", status=status)
-        if status in {403, 404}:
-            error = SPAuthorizationError if status == 403 else SPFileNotFound
-            raise error("Graph resource request failed", status=status)
-        if status == 409:
-            raise SPConflictError("Graph write conflicted", status=status)
-        if status == 429:
-            raise SPThrottledError(
-                "Graph request was throttled", status=status, retryable=True
-            )
-        raise SPGraphError(
-            "Graph request failed", status=status, retryable=status >= 500
+            error_type = SPAuthenticationError
+            message = "Graph authentication failed"
+        elif status in {403, 404}:
+            error_type = SPAuthorizationError if status == 403 else SPFileNotFound
+            message = "Graph resource request failed"
+        elif status == 409:
+            error_type = SPConflictError
+            message = "Graph write conflicted"
+        elif status == 429:
+            error_type = SPThrottledError
+            message = "Graph request was throttled"
+        else:
+            error_type = SPGraphError
+            message = "Graph request failed"
+        retryable = status == 429 or status >= 500
+        self._emit(
+            "graph.error",
+            operation="request",
+            status=status,
+            failure_class=error_type.__name__,
+            retryable=retryable,
         )
+        raise error_type(message, status=status, retryable=retryable)
 
     @staticmethod
     def _share_id(url: str) -> str:
