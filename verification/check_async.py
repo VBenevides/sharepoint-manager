@@ -13,7 +13,7 @@ msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
 from sharepoint_manager import AsyncSharepointManager, OperationPolicy
-from sharepoint_manager.exceptions import SPUnauthorizedTarget
+from sharepoint_manager.exceptions import SPUnauthorizedTarget, SPValidationError
 
 
 class Response:
@@ -151,6 +151,21 @@ async def main() -> None:
             pass
         else:
             raise AssertionError("async cross-drive item was accepted")
+
+        oversized_url = "https://tenant.sharepoint.com/sites/demo/Other/oversized.bin"
+        client.items[manager._share_id(oversized_url)] = {
+            **file_payload,
+            "id": "oversized",
+            "size": 3,
+        }
+        oversized = Path(directory) / "oversized.bin"
+        try:
+            await manager.download_file_from_url(oversized_url, str(oversized))
+        except SPValidationError:
+            pass
+        else:
+            raise AssertionError("async oversized response accepted")
+        assert not oversized.exists()
 
         local_folder = Path(directory) / "local-folder"
         local_folder.mkdir()

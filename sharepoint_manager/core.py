@@ -1359,6 +1359,15 @@ class SharepointManager(SharepointManagerBase):
             self._raise_for_status(response)
             for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
                 if chunk:
+                    policy = getattr(self, "policy", OperationPolicy())
+                    if (
+                        downloaded_bytes + len(chunk) > int(file_obj.size)
+                        or downloaded_bytes + len(chunk) > policy.max_file_bytes
+                        or downloaded_bytes + len(chunk) > policy.max_total_bytes
+                    ):
+                        raise SPValidationError(
+                            "Downloaded content exceeded its budget"
+                        )
                     output.write(chunk)
                     digest.update(chunk)
                     downloaded_bytes += len(chunk)

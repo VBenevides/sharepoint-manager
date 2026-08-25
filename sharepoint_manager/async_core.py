@@ -466,7 +466,11 @@ class AsyncSharepointManager:
         self, item: SPFile, destination: str, budget: dict[str, Any]
     ) -> None:
         self._validate_capability_url(item.download_url)
-        if int(item.size) > self.policy.max_file_bytes:
+        if int(item.size) > min(
+            self.policy.max_file_bytes,
+            self.policy.max_total_bytes,
+            self.policy.max_disk_bytes,
+        ):
             raise SPValidationError("File exceeds the configured transfer budget")
         directory = os.path.dirname(destination) or "."
         fd, temporary = tempfile.mkstemp(prefix=".sp-async-download-", dir=directory)
@@ -483,7 +487,14 @@ class AsyncSharepointManager:
                     )
                     with os.fdopen(fd, "wb") as output:
                         async for chunk in chunks:
-                            await self._consume_chunk(output, chunk, digest, budget)
+                            await self._consume_chunk(
+                                output,
+                                chunk,
+                                digest,
+                                budget,
+                                downloaded,
+                                int(item.size),
+                            )
                             downloaded += len(chunk)
             else:
                 response = await self._request(
@@ -492,7 +503,9 @@ class AsyncSharepointManager:
                 self._raise_for_status(response)
                 with os.fdopen(fd, "wb") as output:
                     chunk = response.content
-                    await self._consume_chunk(output, chunk, digest, budget)
+                    await self._consume_chunk(
+                        output, chunk, digest, budget, downloaded, int(item.size)
+                    )
                     downloaded = len(chunk)
             if downloaded != int(item.size):
                 raise SPValidationError("Downloaded content was incomplete")
@@ -508,10 +521,23 @@ class AsyncSharepointManager:
                 pass
 
     async def _consume_chunk(
-        self, output: Any, chunk: bytes, digest: QuickXorHash, budget: dict[str, Any]
+        self,
+        output: Any,
+        chunk: bytes,
+        digest: QuickXorHash,
+        budget: dict[str, Any],
+        downloaded: int = 0,
+        declared_size: int | None = None,
     ) -> None:
         if not chunk:
             return
+        next_size = downloaded + len(chunk)
+        if declared_size is not None and next_size > declared_size:
+            raise SPValidationError("Downloaded content exceeded its declared size")
+        if next_size > self.policy.max_file_bytes:
+            raise SPValidationError("Downloaded content exceeded its file budget")
+        if budget["bytes"] + len(chunk) > self.policy.max_total_bytes:
+            raise SPValidationError("Transfer byte budget exceeded")
         self._consume_budget(budget, byte_count=len(chunk))
         output.write(chunk)
         digest.update(chunk)
