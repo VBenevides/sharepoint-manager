@@ -9,7 +9,10 @@ from sharepoint_manager import SharepointManager
 
 def run(manager: SharepointManager, source: Path, destination: Path) -> None:
     """Move a local tree to and from one explicit SharePoint folder."""
-    remote_folder = "https://tenant.sharepoint.com/sites/demo/Documents/Reports"
+    remote_folder = "https://tenant.sharepoint.com/sites/demo"
+    for segment in ("Documents", "Reports"):
+        remote_folder = f"{remote_folder}/{segment}"
+        manager.get_folder_metadata_from_url(remote_folder)
     manager.upload_folder_to_folder_url(remote_folder, str(source))
     manager.download_folder_from_url(remote_folder, str(destination))
 
@@ -24,6 +27,7 @@ def main() -> None:
         (source / "2026.txt").write_text("offline\n", encoding="utf-8")
         manager = Mock(spec=SharepointManager)
         run(manager, source, destination)
+        assert manager.get_folder_metadata_from_url.call_count == 2
         manager.upload_folder_to_folder_url.assert_called_once()
         manager.download_folder_from_url.assert_called_once()
     print("offline synchronous filesystem example complete")
