@@ -1471,9 +1471,12 @@ class SharepointManager(SharepointManagerBase):
 
         try:
             return self._create_single_folder(parent_data.id, folder_name)
-        except SPConflictError:
+        except SPConflictError as conflict:
             # A concurrent creator may have won after the initial miss.
-            return self._get_folder(folder_path)
+            try:
+                return self._get_folder(folder_path)
+            except SPFolderNotFound:
+                raise conflict
 
     # ----------------------------------------------------------
     # Basic file system functions
