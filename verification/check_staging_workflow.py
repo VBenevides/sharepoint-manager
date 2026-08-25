@@ -18,7 +18,7 @@ def main() -> None:
     for required in (
         "list_files",
         "list_folders",
-        "get_folder_delta",
+        "iter_folder_delta",
         'conflict_behavior="fail"',
         "delete_file",
         "SPAuthorizationError",

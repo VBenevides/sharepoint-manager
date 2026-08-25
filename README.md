@@ -68,7 +68,6 @@ federation, certificates, or another provider, inject a `TokenProvider` with
 - `iter_collection()` yields bounded `SPCollectionPage` values lazily.
   `iter_folder_delta()` yields `SPDeltaPage` values containing files, folders,
   tombstones, and checkpoint links. Persist `delta_link` in the caller's store.
-  `get_folder_delta()` remains the materialized compatibility wrapper.
 - Approved SharePoint URLs support folder metadata, listing, creation, empty
   deletion, normalized permissions, and file transfers. Site/drive boundaries
   are checked before operations.

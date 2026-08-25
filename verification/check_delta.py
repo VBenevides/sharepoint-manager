@@ -49,13 +49,13 @@ def main() -> None:
         ),
     }
     manager._request = lambda method, url, **kwargs: pages[url]
-    checkpoint, files, folders, deleted = manager._consume_delta(
-        "https://graph.microsoft.com/v1.0/delta"
+    result = list(
+        manager.iter_folder_delta(delta_link="https://graph.microsoft.com/v1.0/delta")
     )
-    assert checkpoint.endswith("token=done")
-    assert [item.id for item in files] == ["f1"]
-    assert not folders
-    assert [(item.id, item.metadata["deleted"]) for item in deleted] == [
+    assert result[-1].delta_link.endswith("token=done")
+    assert [item.id for item in result[0].files] == ["f1"]
+    assert not result[0].folders
+    assert [(item.id, item.metadata["deleted"]) for item in result[1].deleted] == [
         ("gone", {"state": "deleted"})
     ]
 

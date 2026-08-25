@@ -24,7 +24,8 @@ def main() -> None:
     try:
         manager.list_files(folder_path)
         manager.list_folders(folder_path)
-        manager.get_folder_delta(folder_path)
+        for _ in manager.iter_folder_delta(folder_path):
+            pass
         if os.environ.get("SP_STAGING_ALLOW_DESTRUCTIVE") == "true":
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory, "staging-smoke-empty.txt")

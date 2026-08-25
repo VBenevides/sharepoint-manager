@@ -6,6 +6,7 @@ def main() -> None:
     readme = (root / "README.md").read_text()
     contributing = (root / "CONTRIBUTING.md").read_text()
     security = (root / "SECURITY.md").read_text()
+    migration = (root / "docs/migration-0.1.md").read_text()
     for required in (
         "Sites.Selected",
         "TokenProvider",
@@ -20,6 +21,8 @@ def main() -> None:
         assert required in readme, required
     assert "verification/run_core_checks.py" in contributing
     assert "least-privilege staging site" in security
+    assert "iter_folder_delta()" in migration
+    assert "UserDelegatedCredential" in migration
 
 
 if __name__ == "__main__":

@@ -4,6 +4,9 @@ This is an intentional breaking release from `0.0.x`. The 0.1.x contract is
 the supported surface; compatibility aliases, deprecated facades, and ambient
 manager state are not part of the design.
 
+See [the migration note](migration-0.1.md) for the removed workflows and their
+replacements.
+
 ## Clients and authentication
 
 - `SharepointManager` provides bounded synchronous operations.
