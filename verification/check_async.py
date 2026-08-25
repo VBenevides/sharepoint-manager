@@ -14,7 +14,12 @@ msal.ConfidentialClientApplication = type("Confidential", (), {})
 msal.PublicClientApplication = type("Public", (), {})
 sys.modules.setdefault("msal", msal)
 
-from sharepoint_manager import AsyncSharepointManager, OperationPolicy, async_core
+from sharepoint_manager import (
+    AsyncSharepointManager,
+    ClientCredential,
+    OperationPolicy,
+    async_core,
+)
 from sharepoint_manager.core import _DIRECT_UPLOAD_MAX_BYTES
 from sharepoint_manager.exceptions import (
     SPDeadlineExceeded,
@@ -152,6 +157,52 @@ class Provider:
 
 
 async def main() -> None:
+    class ConfidentialClient:
+        authority = None
+
+        def __init__(self, client_id, *, client_credential, authority):
+            self.client_id = client_id
+            self.client_credential = client_credential
+            self.authority = authority
+
+        def acquire_token_for_client(self, scopes):
+            assert scopes == ["https://graph.microsoft.com/.default"]
+            return {"access_token": "credential-token", "expires_in": 3600}
+
+    original_msal = sys.modules["msal"]
+    original_to_thread = async_core.asyncio.to_thread
+
+    async def direct_to_thread(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    credential_msal = types.ModuleType("msal")
+    credential_msal.ConfidentialClientApplication = ConfidentialClient
+    credential_msal.PublicClientApplication = ConfidentialClient
+    sys.modules["msal"] = credential_msal
+    async_core.asyncio.to_thread = direct_to_thread
+    try:
+        credential_manager = AsyncSharepointManager(
+            "https://tenant.sharepoint.com/sites/demo",
+            ClientCredential("client-id", "client-secret"),
+            tenant_id="tenant-guid",
+            client=Client(),
+        )
+        assert await credential_manager._ensure_token() == "credential-token"
+        assert credential_manager._msal_client.authority.endswith("/tenant-guid")
+        try:
+            AsyncSharepointManager(
+                "https://tenant.sharepoint.com/sites/demo",
+                ClientCredential("client-id", "client-secret"),
+                client=Client(),
+            )
+        except ValueError as exc:
+            assert "tenant_id" in str(exc)
+        else:
+            raise AssertionError("credential auth accepted a missing tenant_id")
+    finally:
+        sys.modules["msal"] = original_msal
+        async_core.asyncio.to_thread = original_to_thread
+
     client = Client()
     manager = AsyncSharepointManager(
         "https://tenant.sharepoint.com/sites/demo",

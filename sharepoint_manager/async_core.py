@@ -71,6 +71,7 @@ class AsyncSharepointManager:
         *,
         token_provider: TokenProvider | None = None,
         graph_host: str = "graph.microsoft.com",
+        tenant_id: str | None = None,
         policy: OperationPolicy | None = None,
         client: Any | None = None,
         telemetry: Callable[[dict[str, Any]], None] | None = None,
@@ -83,9 +84,16 @@ class AsyncSharepointManager:
             )
         if credentials is None and token_provider is None:
             raise ValueError("credentials or token_provider is required")
+        if tenant_id is not None:
+            tenant_id = tenant_id.strip()
+            if not tenant_id or "/" in tenant_id or "\\" in tenant_id:
+                raise SPValidationError("tenant_id must be a tenant name or GUID")
+        if credentials is not None and token_provider is None and tenant_id is None:
+            raise ValueError("tenant_id is required when credentials are used")
 
         self.sharepoint_site_url = sharepoint_site_url
         self.graph_host = graph_host
+        self.tenant_id = tenant_id
         self._graph_base_url = f"https://{graph_host}/v1.0"
         self.policy = policy or OperationPolicy()
         self.credentials = credentials
@@ -209,12 +217,12 @@ class AsyncSharepointManager:
                 self._msal_client = ConfidentialClientApplication(
                     self.credentials.client_id,
                     client_credential=self.credentials.client_secret,
-                    authority="https://login.microsoftonline.com/common",
+                    authority=f"https://login.microsoftonline.com/{self.tenant_id}",
                 )
             elif self._user_credentials:
                 self._msal_client = PublicClientApplication(
                     self.credentials.client_id,
-                    authority="https://login.microsoftonline.com/common",
+                    authority=f"https://login.microsoftonline.com/{self.tenant_id}",
                 )
             else:
                 raise SPAuthenticationError("Unsupported credentials")
