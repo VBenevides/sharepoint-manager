@@ -2,22 +2,6 @@ import logging
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-_logger = logging.getLogger(__name__)
-if _logger.level == logging.NOTSET:
-    _logger.setLevel(logging.WARNING)
-_logger.addHandler(logging.NullHandler())
-
-try:
-    __version__ = version("sharepoint_manager")
-except PackageNotFoundError:
-    __version__ = (
-        Path(__file__)
-        .parents[1]
-        .joinpath("VERSION")
-        .read_text(encoding="utf-8")
-        .strip()
-    )
-
 # Import core components
 from .async_core import AsyncSharepointManager
 from .core import SharepointManager
@@ -49,6 +33,22 @@ from .exceptions import (
     SPValidationError,
 )
 from .utils import QuickXorHash
+
+_logger = logging.getLogger(__name__)
+if _logger.level == logging.NOTSET:
+    _logger.setLevel(logging.WARNING)
+_logger.addHandler(logging.NullHandler())
+
+try:
+    __version__ = version("sharepoint_manager")
+except PackageNotFoundError:
+    __version__ = (
+        Path(__file__)
+        .parents[1]
+        .joinpath("VERSION")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
 
 __all__ = [
     "AsyncSharepointManager",
