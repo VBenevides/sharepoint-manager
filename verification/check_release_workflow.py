@@ -17,6 +17,9 @@ def main() -> None:
         "actions/attest-build-provenance",
         "pypa/gh-action-pypi-publish",
         "Smoke-install",
+        "for attempt in {1..12}",
+        "--no-cache-dir",
+        "sleep 10",
     ):
         assert required in workflow, required
     assert "## [0.1.0]" in changelog

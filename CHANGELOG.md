@@ -7,8 +7,8 @@
 - Added six offline examples covering client credentials, legacy delegated
   credentials, synchronous and asynchronous filesystem workflows, and URL
   workflows.
-- Added NumPy-style public API documentation, doctest/signature checks, and
-  sync/async contract checks.
+- Added NumPy-style documentation for exported classes and methods, plus
+  doctest and signature checks, and sync/async contract checks.
 
 ### Bugfixes
 

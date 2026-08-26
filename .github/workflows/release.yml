@@ -54,7 +54,17 @@ jobs:
       - name: Smoke-install the published version
         run: |
           python -m venv "$RUNNER_TEMP/release-smoke"
-          "$RUNNER_TEMP/release-smoke/bin/python" -m pip install \
-            "sharepoint_manager==${GITHUB_REF_NAME#v}"
+          for attempt in {1..12}; do
+            if "$RUNNER_TEMP/release-smoke/bin/python" -m pip install \
+              --disable-pip-version-check --no-cache-dir \
+              --index-url https://pypi.org/simple \
+              "sharepoint_manager==${GITHUB_REF_NAME#v}"; then
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              exit 1
+            fi
+            sleep 10
+          done
           "$RUNNER_TEMP/release-smoke/bin/python" -c \
             "import sharepoint_manager; print(sharepoint_manager.__version__)"
