@@ -33,7 +33,7 @@ class Response:
         return None
 
 
-def main() -> None:
+def _configure_manager():
     manager = object.__new__(SharepointManager)
     manager.graph_host = "graph.microsoft.com"
     manager._graph_base_url = "https://graph.microsoft.com/v1.0"
@@ -96,6 +96,10 @@ def main() -> None:
         raise AssertionError((method, url))
 
     manager._request = request
+    return manager, share_url, folder, calls
+
+
+def _check_folder_metadata(manager, share_url, calls):
     metadata = manager.get_folder_metadata_from_url(share_url)
     assert metadata.id == "folder-a"
     sharing_url = "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc"
@@ -111,6 +115,8 @@ def main() -> None:
     assert permissions[0]["granted_to"]["id"] == "user-a"
     assert permissions[0]["roles"] == ("read",)
 
+
+def _check_deletions(manager, share_url, folder):
     try:
         manager.create_folder_from_url(share_url, "bad/name")
     except SPValidationError:
@@ -159,6 +165,8 @@ def main() -> None:
     manager.delete_folder_from_url(share_url, force_delete=True)
     assert not child_lists
 
+
+def _check_boundaries(manager, share_url, folder):
     manager._request = lambda method, url, **kwargs: Response(
         {**folder, "parentReference": {"siteId": "site-b", "driveId": "drive-a"}}
     )
@@ -188,7 +196,10 @@ def main() -> None:
     )
     file_permissions = manager.get_file_permissions_from_url(share_url)
     assert file_permissions[0]["granted_to"]["id"] == "user-a"
+    return file_obj
 
+
+def _check_transfer_adapters(manager, share_url, file_obj):
     transfer_calls = []
     manager.get_folder_metadata_from_url = lambda url: SPFolder(
         id="folder-a",
@@ -219,6 +230,13 @@ def main() -> None:
     ]
     assert all(call[2]["_folder"].id == "folder-a" for call in transfer_calls)
 
+
+def main() -> None:
+    manager, share_url, manager_folder, calls = _configure_manager()
+    _check_folder_metadata(manager, share_url, calls)
+    _check_deletions(manager, share_url, manager_folder)
+    file_obj = _check_boundaries(manager, share_url, manager_folder)
+    _check_transfer_adapters(manager, share_url, file_obj)
     assert len(calls) >= 6
 
 
