@@ -185,6 +185,7 @@ async def _check_credential_authentication() -> None:
     original_to_thread = async_core.asyncio.to_thread
 
     async def direct_to_thread(function, /, *args, **kwargs):
+        await asyncio.sleep(0)
         return function(*args, **kwargs)
 
     credential_msal = types.ModuleType("msal")
