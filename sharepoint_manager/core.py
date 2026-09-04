@@ -377,43 +377,115 @@ class SharepointManagerBase:
                     if self._active_requests == 0:
                         condition.notify_all()
 
-    def _request(
+    @staticmethod
+    def _request_timeout(
+        timeout: int | tuple[int, int] | None, remaining: float
+    ) -> int | float | tuple[float, ...] | None:
+        if timeout is None:
+            return remaining
+        if isinstance(timeout, tuple):
+            return tuple(min(float(value), remaining) for value in timeout)
+        if isinstance(timeout, (int, float)):
+            return min(float(timeout), remaining)
+        return timeout
+
+    def _retry_request_exception(
         self,
+        exc: requests.RequestException,
+        *,
         method: str,
-        url: str,
-        headers: dict[str, Any] | None = None,
-        timeout: int | tuple[int, int] | None = 30,
-        json: Any | None = None,
-        data: Any | None = None,
-        params: dict[str, Any] | None = None,
-        stream: bool = False,
-        max_attempts: int = 5,
-        authenticated: bool | None = None,
-        allow_redirects: bool | None = None,
+        attempt: int,
+        request_started: float,
+        retryable: bool,
+        max_attempts: int,
+        deadline: float,
+        policy: OperationPolicy,
+    ) -> bool:
+        self._emit_telemetry(
+            "graph.request",
+            method=method,
+            attempt=attempt,
+            elapsed_ms=round((time.monotonic() - request_started) * 1000, 1),
+            failure_class=type(exc).__name__,
+            retryable=retryable,
+        )
+        if not retryable or attempt >= max_attempts or time.monotonic() >= deadline:
+            return False
+        time.sleep(min(2**attempt, policy.max_retry_after_seconds))
+        return True
+
+    @staticmethod
+    def _retry_after_delay(
+        response: requests.Response,
+        attempt: int,
+        policy: OperationPolicy,
+        deadline: float,
+    ) -> float:
+        retry_after = response.headers.get("Retry-After")
+        delay: float | None = None
+        if retry_after is not None:
+            try:
+                delay = float(int(retry_after))
+            except (TypeError, ValueError):
+                try:
+                    target = parsedate_to_datetime(retry_after)
+                    delay = max(0.0, target.timestamp() - time.time())
+                except (TypeError, ValueError):
+                    delay = None
+        if delay is None:
+            delay = float(min(2**attempt, 60))
+        return min(
+            delay,
+            policy.max_retry_after_seconds,
+            max(0.0, deadline - time.monotonic()),
+        )
+
+    def _retry_response(
+        self,
+        response: requests.Response,
+        *,
+        method: str,
+        attempt: int,
+        max_attempts: int,
+        deadline: float,
+        policy: OperationPolicy,
+        request_id: str | None,
+    ) -> bool:
+        if (
+            response.status_code not in _RETRY_STATUSES
+            or method not in _RETRY_METHODS
+            or attempt >= max_attempts
+        ):
+            return False
+        delay = self._retry_after_delay(response, attempt, policy, deadline)
+        try:
+            response.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        if time.monotonic() >= deadline:
+            raise SPDeadlineExceeded(
+                "Graph request deadline exceeded",
+                status=response.status_code,
+                request_id=request_id,
+                retryable=True,
+            )
+        time.sleep(delay)
+        return True
+
+    def _request_loop(
+        self,
+        *,
+        method: str,
+        timeout: int | tuple[int, int] | None,
+        authenticated: bool,
+        allow_redirects: bool,
+        retryable: bool,
+        max_attempts: int,
+        deadline: float,
+        policy: OperationPolicy,
+        request_kwargs: dict[str, Any],
     ) -> requests.Response:
-        if getattr(self, "_closed", False):
-            raise SPValidationError("SharePoint manager is closed")
-        if authenticated is None:
-            authenticated = bool(
-                headers and str(headers.get("Authorization", "")).startswith("Bearer ")
-            )
-        if authenticated:
-            self._validate_graph_url(url)
-        elif url != self.tenant_url:
-            self._validate_capability_url(url)
-        if allow_redirects is None:
-            allow_redirects = (
-                not authenticated
-                and getattr(
-                    self, "policy", OperationPolicy()
-                ).allow_capability_redirects
-            )
-        method = method.upper()
-        retryable = method in _RETRY_METHODS
         attempt = 1
-        policy = getattr(self, "policy", OperationPolicy())
-        max_attempts = min(max_attempts, policy.max_retry_attempts) if retryable else 1
-        deadline = time.monotonic() + policy.wall_clock_seconds
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -421,55 +493,35 @@ class SharepointManagerBase:
                     "Graph request deadline exceeded", retryable=True
                 )
             request_started = time.monotonic()
-            request_timeout = remaining if timeout is None else timeout
-            if isinstance(request_timeout, tuple):
-                request_timeout = tuple(
-                    min(float(value), remaining) for value in request_timeout
-                )
-            elif isinstance(request_timeout, (int, float)):
-                request_timeout = min(float(request_timeout), remaining)
+            request_kwargs["timeout"] = self._request_timeout(timeout, remaining)
             try:
-                resp = self._perform_request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    timeout=request_timeout,
-                    json=json,
-                    data=data,
-                    params=params,
-                    stream=stream,
-                    allow_redirects=allow_redirects,
-                )
+                resp = self._perform_request(**request_kwargs)
             except requests.RequestException as exc:
-                self._emit_telemetry(
-                    "graph.request",
+                if self._retry_request_exception(
+                    exc,
                     method=method,
                     attempt=attempt,
-                    elapsed_ms=round((time.monotonic() - request_started) * 1000, 1),
-                    failure_class=type(exc).__name__,
+                    request_started=request_started,
                     retryable=retryable,
-                )
-                if (
-                    not retryable
-                    or attempt >= max_attempts
-                    or time.monotonic() >= deadline
+                    max_attempts=max_attempts,
+                    deadline=deadline,
+                    policy=policy,
                 ):
-                    if time.monotonic() >= deadline:
-                        if not authenticated:
-                            raise SPDeadlineExceeded(
-                                "Graph request deadline exceeded", retryable=True
-                            ) from None
-                        raise SPDeadlineExceeded(
-                            "Graph request deadline exceeded",
-                            retryable=True,
-                            cause=exc,
-                        ) from exc
+                    attempt += 1
+                    continue
+                if time.monotonic() >= deadline:
                     if not authenticated:
-                        raise SPGraphError("Capability request failed") from None
-                    raise
-                time.sleep(min(2**attempt, policy.max_retry_after_seconds))
-                attempt += 1
-                continue
+                        raise SPDeadlineExceeded(
+                            "Graph request deadline exceeded", retryable=True
+                        ) from None
+                    raise SPDeadlineExceeded(
+                        "Graph request deadline exceeded",
+                        retryable=True,
+                        cause=exc,
+                    ) from exc
+                if not authenticated:
+                    raise SPGraphError("Capability request failed") from None
+                raise
             if time.monotonic() >= deadline:
                 request_id = resp.headers.get("request-id") or resp.headers.get(
                     "client-request-id"
@@ -504,44 +556,75 @@ class SharepointManagerBase:
                 throttled=resp.status_code == 429,
                 retrying=resp.status_code in _RETRY_STATUSES and attempt < max_attempts,
             )
-            # Handle throttling / transient 5xx with Retry-After.
-            if resp.status_code in _RETRY_STATUSES and attempt < max_attempts:
-                retry_after = resp.headers.get("Retry-After")
-                delay: float | None = None
-                if retry_after is not None:
-                    try:
-                        delay = float(int(retry_after))
-                    except (TypeError, ValueError):
-                        # Fall back to HTTP-date format.
-                        try:
-                            target = parsedate_to_datetime(retry_after)
-                            delay = max(0.0, target.timestamp() - time.time())
-                        except (TypeError, ValueError):
-                            delay = None
-                if delay is None:
-                    delay = float(min(2**attempt, 60))
-                delay = min(
-                    delay,
-                    policy.max_retry_after_seconds,
-                    max(0.0, deadline - time.monotonic()),
-                )
-                # Release any streamed body before sleeping to avoid leaking
-                # connections back to the pool in CLOSE_WAIT.
-                try:
-                    resp.close()
-                except Exception:  # noqa: BLE001, S110
-                    pass
-                if time.monotonic() >= deadline:
-                    raise SPDeadlineExceeded(
-                        "Graph request deadline exceeded",
-                        status=resp.status_code,
-                        request_id=request_id,
-                        retryable=True,
-                    )
-                time.sleep(delay)
+            if self._retry_response(
+                resp,
+                method=method,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                deadline=deadline,
+                policy=policy,
+                request_id=request_id,
+            ):
                 attempt += 1
                 continue
             return resp
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, Any] | None = None,
+        timeout: int | tuple[int, int] | None = 30,
+        json: Any | None = None,
+        data: Any | None = None,
+        params: dict[str, Any] | None = None,
+        stream: bool = False,
+        max_attempts: int = 5,
+        authenticated: bool | None = None,
+        allow_redirects: bool | None = None,
+    ) -> requests.Response:
+        if getattr(self, "_closed", False):
+            raise SPValidationError("SharePoint manager is closed")
+        if authenticated is None:
+            authenticated = bool(
+                headers and str(headers.get("Authorization", "")).startswith("Bearer ")
+            )
+        if authenticated:
+            self._validate_graph_url(url)
+        elif url != self.tenant_url:
+            self._validate_capability_url(url)
+        if allow_redirects is None:
+            allow_redirects = (
+                not authenticated
+                and getattr(
+                    self, "policy", OperationPolicy()
+                ).allow_capability_redirects
+            )
+        method = method.upper()
+        retryable = method in _RETRY_METHODS
+        policy = getattr(self, "policy", OperationPolicy())
+        max_attempts = min(max_attempts, policy.max_retry_attempts) if retryable else 1
+        deadline = time.monotonic() + policy.wall_clock_seconds
+        return self._request_loop(
+            method=method,
+            timeout=timeout,
+            authenticated=authenticated,
+            allow_redirects=allow_redirects,
+            retryable=retryable,
+            max_attempts=max_attempts,
+            deadline=deadline,
+            policy=policy,
+            request_kwargs={
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "json": json,
+                "data": data,
+                "params": params,
+                "stream": stream,
+                "allow_redirects": allow_redirects,
+            },
+        )
 
     def _raise_for_status(
         self,
