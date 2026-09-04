@@ -16,7 +16,11 @@ from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
-from .core import _DIRECT_UPLOAD_MAX_BYTES, SharepointManagerBase
+from .core import (
+    _DIRECT_UPLOAD_MAX_BYTES,
+    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
+    SharepointManagerBase,
+)
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
@@ -330,7 +334,7 @@ class AsyncSharepointManager:
                 if hasattr(response, "aclose"):
                     await response.aclose()
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded",
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
                     status=getattr(response, "status_code", None),
                     request_id=request_id,
                     retryable=True,
@@ -353,7 +357,7 @@ class AsyncSharepointManager:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded", retryable=True
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
                 )
             request_kwargs = dict(kwargs)
             request_kwargs["timeout"] = min(
@@ -365,7 +369,7 @@ class AsyncSharepointManager:
                 )
             except asyncio.TimeoutError as exc:
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded", retryable=True
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
                 ) from exc
             if time.monotonic() >= deadline:
                 request_id = response.headers.get("request-id") or response.headers.get(
@@ -373,7 +377,7 @@ class AsyncSharepointManager:
                 )
                 await self._close_response(response)
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded",
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
                     status=getattr(response, "status_code", None),
                     request_id=request_id,
                     retryable=True,
@@ -398,7 +402,7 @@ class AsyncSharepointManager:
             if delay >= remaining:
                 await self._close_response(response)
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded",
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
                     status=response.status_code,
                     request_id=response.headers.get("request-id"),
                     retryable=True,
