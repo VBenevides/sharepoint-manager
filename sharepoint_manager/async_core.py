@@ -668,7 +668,9 @@ class AsyncSharepointManager:
                     "GET", item.download_url, authenticated=False
                 )
                 self._raise_for_status(response)
-                with os.fdopen(fd, "wb") as output:
+                with (
+                    os.fdopen(fd, "wb") as output
+                ):  # NOSONAR — no stdlib async file API for mkstemp descriptors
                     fd = None
                     chunk = response.content
                     await self._consume_chunk(
