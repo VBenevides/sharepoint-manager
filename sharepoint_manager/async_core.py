@@ -497,6 +497,18 @@ class AsyncSharepointManager:
     def _validate_boundary(self, item: dict[str, Any]) -> None:
         SharepointManagerBase._validate_item_boundary(self, item)
 
+    async def _request_item(
+        self, endpoint: str, *, not_found: type[SPNotFoundError]
+    ) -> dict[str, Any]:
+        response = await self._retry_request("GET", endpoint)
+        try:
+            self._raise_for_status(response, not_found=not_found)
+            item = response.json()
+        finally:
+            await self._close_response(response)
+        self._validate_boundary(item)
+        return item
+
     async def _get_item_from_url(
         self, url: str, *, not_found: type[SPNotFoundError] = SPNotFoundError
     ) -> dict[str, Any]:
@@ -511,25 +523,11 @@ class AsyncSharepointManager:
             endpoint = f"{self._graph_base_url}/drives/{self._drive_id}/root"
             if relative_path:
                 endpoint += f":/{quote(relative_path, safe='/')}"
-            response = await self._retry_request("GET", endpoint)
-            try:
-                self._raise_for_status(response, not_found=not_found)
-                item = response.json()
-            finally:
-                await self._close_response(response)
-            self._validate_boundary(item)
-            return item
-        response = await self._retry_request(
-            "GET",
+            return await self._request_item(endpoint, not_found=not_found)
+        return await self._request_item(
             f"https://{self.graph_host}/v1.0/shares/{self._share_id(url)}/driveItem",
+            not_found=not_found,
         )
-        try:
-            self._raise_for_status(response, not_found=not_found)
-            item = response.json()
-        finally:
-            await self._close_response(response)
-        self._validate_boundary(item)
-        return item
 
     async def _children(
         self, folder: SPFolder, budget: dict[str, Any] | None = None
