@@ -217,7 +217,7 @@ async def _check_credential_authentication() -> None:
 
 async def _check_failed_provider() -> None:
     class FailingProvider:
-        def get_token(self, scope):
+        def get_token(self, _scope):
             return {"error": "invalid_grant", "error_description": "secret-canary"}
 
     failing_manager = AsyncSharepointManager(
