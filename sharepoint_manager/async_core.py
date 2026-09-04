@@ -640,7 +640,9 @@ class AsyncSharepointManager:
                             chunks: AsyncIterator[bytes] = response.aiter_bytes(
                                 _DOWNLOAD_CHUNK_SIZE
                             )
-                            with os.fdopen(fd, "wb") as output:
+                            with (
+                                os.fdopen(fd, "wb") as output
+                            ):  # NOSONAR — no stdlib async file API for mkstemp descriptors
                                 fd = None
                                 async for chunk in chunks:
                                     await self._consume_chunk(
