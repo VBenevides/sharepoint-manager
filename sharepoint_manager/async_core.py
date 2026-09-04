@@ -809,7 +809,7 @@ class AsyncSharepointManager:
         upload_url = session_response.json()["uploadUrl"]
         offset = 0
         response = None
-        with path.open("rb") as source:  # noqa: ASYNC230
+        with path.open("rb") as source:  # noqa: ASYNC230  # NOSONAR — no stdlib async file API
             while chunk := source.read(_CHUNK_SIZE):
                 end = offset + len(chunk) - 1
                 response = await self._retry_request(
