@@ -240,7 +240,7 @@ class AsyncSharepointManager:
             self._emit("auth.token_refresh", success=True)
             return self._cached_token
 
-    async def _acquire_msal_token(self) -> dict[str, Any]:
+    async def _ensure_msal_client(self) -> None:
         if self._msal_client is None:
             try:
                 from msal import ConfidentialClientApplication, PublicClientApplication
@@ -262,46 +262,55 @@ class AsyncSharepointManager:
             else:
                 raise SPAuthenticationError("Unsupported credentials")
 
+    async def _get_msal_account(self) -> Any:
+        if self._account is None:
+            accounts = await asyncio.to_thread(
+                self._msal_client.get_accounts, username=self._username
+            )
+            self._account = accounts[0] if accounts else None
+        return self._account
+
+    async def _acquire_password_token(self, scopes: list[str]) -> dict[str, Any]:
+        if not self._warned_password_auth:
+            warnings.warn(
+                "Username/password authentication is deprecated and does not support MFA or Conditional Access; the password is used only for initial token bootstrap.",
+                UserWarning,
+                stacklevel=3,
+            )
+            self._warned_password_auth = True
+        if self._password is None:
+            raise SPAuthenticationError(
+                "Silent authentication failed; credentials must be supplied again"
+            )
+        result = await asyncio.to_thread(
+            self._msal_client.acquire_token_by_username_password,
+            username=self._username,
+            password=self._password,
+            scopes=scopes,
+        )
+        if isinstance(result, dict) and "access_token" in result:
+            self._password = None
+            self.credentials = None
+            await self._get_msal_account()
+        return result
+
+    async def _acquire_user_token(self, scopes: list[str]) -> dict[str, Any]:
+        account = await self._get_msal_account()
+        if account is not None:
+            result = await asyncio.to_thread(
+                self._msal_client.acquire_token_silent,
+                scopes=scopes,
+                account=account,
+            )
+            if result and "access_token" in result:
+                return result
+        return await self._acquire_password_token(scopes)
+
+    async def _acquire_msal_token(self) -> dict[str, Any]:
+        await self._ensure_msal_client()
         scopes = [f"https://{self.graph_host}/.default"]
         if self._user_credentials:
-            if self._account is None:
-                accounts = await asyncio.to_thread(
-                    self._msal_client.get_accounts, username=self._username
-                )
-                self._account = accounts[0] if accounts else None
-            if self._account is not None:
-                result = await asyncio.to_thread(
-                    self._msal_client.acquire_token_silent,
-                    scopes=scopes,
-                    account=self._account,
-                )
-                if result and "access_token" in result:
-                    return result
-            if not self._warned_password_auth:
-                warnings.warn(
-                    "Username/password authentication is deprecated and does not support MFA or Conditional Access; the password is used only for initial token bootstrap.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-                self._warned_password_auth = True
-            if self._password is None:
-                raise SPAuthenticationError(
-                    "Silent authentication failed; credentials must be supplied again"
-                )
-            result = await asyncio.to_thread(
-                self._msal_client.acquire_token_by_username_password,
-                username=self._username,
-                password=self._password,
-                scopes=scopes,
-            )
-            if isinstance(result, dict) and "access_token" in result:
-                self._password = None
-                self.credentials = None
-                accounts = await asyncio.to_thread(
-                    self._msal_client.get_accounts, username=self._username
-                )
-                self._account = accounts[0] if accounts else None
-            return result
+            return await self._acquire_user_token(scopes)
 
         return await asyncio.to_thread(
             self._msal_client.acquire_token_for_client, scopes=scopes
