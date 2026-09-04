@@ -14,6 +14,8 @@ from sharepoint_manager.core import SharepointManager
 from sharepoint_manager.dataclasses import OperationPolicy, SPFolder
 from sharepoint_manager.exceptions import SPAmbiguousWriteError
 
+_UPLOAD_SESSION_URL = "https://upload.sharepoint.com/session"
+
 
 class Response:
     def __init__(self, status, body):
@@ -82,7 +84,7 @@ def main() -> None:
         large.write_bytes(b"x" * large_size)
         manager = manager_for(
             [
-                Response(200, {"uploadUrl": "https://upload.sharepoint.com/session"}),
+                Response(200, {"uploadUrl": _UPLOAD_SESSION_URL}),
                 Response(202, {}),
                 Response(201, {"id": "large", "name": "large.bin", "file": {}}),
             ]
@@ -91,13 +93,11 @@ def main() -> None:
             manager.upload_file(str(large), _folder=manager._root_folder).id == "large"
         )
 
-        manager = manager_for(
-            [Response(200, {"uploadUrl": "https://upload.sharepoint.com/session"})]
-        )
+        manager = manager_for([Response(200, {"uploadUrl": _UPLOAD_SESSION_URL})])
         manager._request = lambda method, url, **kwargs: (
             (_ for _ in ()).throw(RuntimeError("network"))
             if method == "PUT"
-            else Response(200, {"uploadUrl": "https://upload.sharepoint.com/session"})
+            else Response(200, {"uploadUrl": _UPLOAD_SESSION_URL})
         )
         try:
             manager.upload_file(str(data), _folder=manager._root_folder)
