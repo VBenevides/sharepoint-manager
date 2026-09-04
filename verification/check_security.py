@@ -40,7 +40,10 @@ def main() -> None:
         else:
             raise AssertionError(unsafe)
 
-    for unsafe in ("http://download.sharepoint.com/file", "https://evil.example/file"):
+    for unsafe in (
+        "http://download.sharepoint.com/file",  # NOSONAR — rejection test input
+        "https://evil.example/file",
+    ):
         try:
             manager._validate_capability_url(unsafe)
         except SPValidationError:
