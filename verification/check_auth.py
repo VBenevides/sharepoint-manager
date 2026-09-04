@@ -25,7 +25,7 @@ class PublicClient:
         self.silent_calls = 0
         self.use_silent = True
 
-    def get_accounts(self, username=None):
+    def get_accounts(self, **_kwargs):
         return [self.account] if self.password_calls else []
 
     def acquire_token_silent(self, scopes, account):
