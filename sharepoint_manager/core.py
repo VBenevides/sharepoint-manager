@@ -720,12 +720,22 @@ class SharepointManagerBase:
                 items=page_items,
                 total_items=item_count + page_items,
             )
-            for item in data.get("value", []):
-                item_count += 1
-                if item_count > policy.max_items:
-                    raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
+            for item, current_count in self._bounded_page_items(
+                data.get("value", []), policy, item_count
+            ):
+                item_count = current_count
                 yield item
             next_url = data.get(_GRAPH_NEXT_LINK)
+
+    @staticmethod
+    def _bounded_page_items(
+        values: Any, policy: OperationPolicy, item_count: int
+    ) -> Iterator[tuple[dict[str, Any], int]]:
+        for item in values:
+            item_count += 1
+            if item_count > policy.max_items:
+                raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
+            yield item, item_count
 
     def iter_collection(self, url: str) -> Iterator[SPCollectionPage]:
         """Yield bounded, caller-consumable Graph collection pages."""
