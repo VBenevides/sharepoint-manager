@@ -141,7 +141,7 @@ class StreamingClient(Client):
         self.max_stream_active = 0
         self.stream_started = asyncio.Event()
 
-    def stream(self, method, url):
+    def stream(self, _method, _url):
         client = self
 
         class Context:
