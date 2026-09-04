@@ -29,6 +29,8 @@ from sharepoint_manager.exceptions import (
     SPValidationError,
 )
 
+_DEMO_SITE_URL = "https://tenant.sharepoint.com/sites/demo"
+
 
 class Response:
     def __init__(self, payload=None, content=b"", status_code=200):
@@ -65,7 +67,7 @@ class Client:
                     {
                         "id": "drive",
                         "name": "Documents",
-                        "webUrl": "https://tenant.sharepoint.com/sites/demo/Documents",
+                        "webUrl": f"{_DEMO_SITE_URL}/Documents",
                     }
                 )
             if "/shares/" in url:
@@ -184,7 +186,7 @@ async def _check_credential_authentication() -> None:
     async_core.asyncio.to_thread = direct_to_thread
     try:
         credential_manager = AsyncSharepointManager(
-            "https://tenant.sharepoint.com/sites/demo",
+            _DEMO_SITE_URL,
             ClientCredential("client-id", "client-secret"),
             tenant_id="tenant-guid",
             client=Client(),
@@ -193,7 +195,7 @@ async def _check_credential_authentication() -> None:
         assert credential_manager._msal_client.authority.endswith("/tenant-guid")
         try:
             AsyncSharepointManager(
-                "https://tenant.sharepoint.com/sites/demo",
+                _DEMO_SITE_URL,
                 ClientCredential("client-id", "client-secret"),
                 client=Client(),
             )
@@ -212,7 +214,7 @@ async def _check_failed_provider() -> None:
             return {"error": "invalid_grant", "error_description": "secret-canary"}
 
     failing_manager = AsyncSharepointManager(
-        "https://tenant.sharepoint.com/sites/demo",
+        _DEMO_SITE_URL,
         token_provider=FailingProvider(),
         client=Client(),
     )
@@ -338,7 +340,7 @@ async def _check_downloads(
         stream_client = StreamingClient()
         stream_client.items[manager._share_id(file_url)] = file_payload
         stream_manager = AsyncSharepointManager(
-            "https://tenant.sharepoint.com/sites/demo",
+            _DEMO_SITE_URL,
             token_provider=Provider(),
             policy=OperationPolicy(max_concurrency=limit),
             client=stream_client,
@@ -388,7 +390,7 @@ async def _check_workload(folder_url: str, folder_payload: dict) -> None:
     workload_client = Client()
     workload_client.request_latency = 0.001
     workload_manager = AsyncSharepointManager(
-        "https://tenant.sharepoint.com/sites/demo",
+        _DEMO_SITE_URL,
         token_provider=Provider(),
         policy=OperationPolicy(max_concurrency=100),
         client=workload_client,
@@ -464,7 +466,7 @@ async def _check_folder_downloads(
     else:
         raise AssertionError("async cross-drive item was accepted")
 
-    oversized_url = "https://tenant.sharepoint.com/sites/demo/Documents/oversized.bin"
+    oversized_url = f"{_DEMO_SITE_URL}/Documents/oversized.bin"
     client.items[manager._share_id(oversized_url)] = {
         **file_payload,
         "id": "oversized",
@@ -568,7 +570,7 @@ async def main() -> None:
 
     client = Client()
     manager = AsyncSharepointManager(
-        "https://tenant.sharepoint.com/sites/demo",
+        _DEMO_SITE_URL,
         token_provider=Provider(),
         policy=OperationPolicy(max_concurrency=2),
         client=client,
@@ -588,9 +590,9 @@ async def main() -> None:
         "folder": {},
         "parentReference": {"driveId": "drive"},
     }
-    file_url = "https://tenant.sharepoint.com/sites/demo/Documents/remote.bin"
-    file_url_2 = "https://tenant.sharepoint.com/sites/demo/Documents/remote-2.bin"
-    folder_url = "https://tenant.sharepoint.com/sites/demo/Documents/folder"
+    file_url = f"{_DEMO_SITE_URL}/Documents/remote.bin"
+    file_url_2 = f"{_DEMO_SITE_URL}/Documents/remote-2.bin"
+    folder_url = f"{_DEMO_SITE_URL}/Documents/folder"
     client.items[manager._share_id(file_url)] = file_payload
     client.items[manager._share_id(file_url_2)] = file_payload_2
     client.items[manager._share_id(folder_url)] = folder_payload
@@ -606,7 +608,7 @@ async def main() -> None:
 
     await _check_retries(manager)
 
-    foreign_url = "https://tenant.sharepoint.com/sites/demo/Other/foreign.bin"
+    foreign_url = f"{_DEMO_SITE_URL}/Other/foreign.bin"
     client.items[manager._share_id(foreign_url)] = {
         **file_payload,
         "id": "foreign",
