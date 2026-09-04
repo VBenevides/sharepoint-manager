@@ -15,10 +15,12 @@ from sharepoint_manager.core import SharepointManager
 from sharepoint_manager.dataclasses import UserDelegatedCredential
 from sharepoint_manager.exceptions import SPAuthenticationError
 
+_TEST_USERNAME = "service@example.com"
+
 
 class PublicClient:
     def __init__(self):
-        self.account = {"username": "service@example.com"}
+        self.account = {"username": _TEST_USERNAME}
         self.password_calls = 0
         self.silent_calls = 0
         self.use_silent = True
@@ -35,7 +37,7 @@ class PublicClient:
         )
 
     def acquire_token_by_username_password(self, username, password, scopes):
-        assert username == "service@example.com"
+        assert username == _TEST_USERNAME
         assert password == "password"
         self.password_calls += 1
         return {"access_token": "bootstrap-token", "expires_in": 3600}
@@ -69,7 +71,7 @@ def main() -> None:
     assert provider.closed
 
     client = PublicClient()
-    credential = UserDelegatedCredential("client-id", "service@example.com", "password")
+    credential = UserDelegatedCredential("client-id", _TEST_USERNAME, "password")
     manager = object.__new__(SharepointManager)
     manager.graph_host = "graph.microsoft.com"
     manager.ca = client
