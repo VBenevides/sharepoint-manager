@@ -27,7 +27,7 @@ def main() -> None:
     manager._validate_capability_url("https://download.sharepoint.com/file")
 
     for unsafe in (
-        "http://graph.microsoft.com/v1.0/me",
+        "http://graph.microsoft.com/v1.0/me",  # NOSONAR — rejection test input
         "https://evil.example/v1.0/me",
         "https://graph.microsoft.com:444/v1.0/me",
         "https://user:pass@graph.microsoft.com/v1.0/me",
