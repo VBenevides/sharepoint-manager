@@ -250,7 +250,7 @@ class AsyncSharepointManager:
             self._emit("auth.token_refresh", success=True)
             return self._cached_token
 
-    async def _ensure_msal_client(self) -> None:
+    def _ensure_msal_client(self) -> None:
         if self._msal_client is None:
             try:
                 from msal import ConfidentialClientApplication, PublicClientApplication
@@ -317,7 +317,7 @@ class AsyncSharepointManager:
         return await self._acquire_password_token(scopes)
 
     async def _acquire_msal_token(self) -> dict[str, Any]:
-        await self._ensure_msal_client()
+        self._ensure_msal_client()
         scopes = [f"https://{self.graph_host}/.default"]
         if self._user_credentials:
             return await self._acquire_user_token(scopes)
