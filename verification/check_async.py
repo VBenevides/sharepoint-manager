@@ -264,6 +264,7 @@ async def _check_retries(manager: AsyncSharepointManager) -> None:
 
     async def fake_sleep(delay):
         sleeps.append(delay)
+        await original_sleep(0)
 
     manager._request = fake_request
     async_core.asyncio.sleep = fake_sleep
