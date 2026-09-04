@@ -28,7 +28,7 @@ class Response:
     def raise_for_status(self):
         return None
 
-    def iter_content(self, chunk_size):
+    def iter_content(self, **_kwargs):
         yield self.content[:2]
         yield self.content[2:]
 
