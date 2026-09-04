@@ -22,7 +22,7 @@ class QuickXorHash:
     def __init__(self):
         """Initialize an empty digest state."""
         self._state = 0
-        self._lengthSoFar = 0
+        self._length_so_far = 0
         self._shiftSoFar = 0
 
     def update(self, array: bytes):
@@ -54,7 +54,7 @@ class QuickXorHash:
         if cbSize > limit:
             self._apply_block(array[limit:])
 
-        self._lengthSoFar += cbSize
+        self._length_so_far += cbSize
 
     def _apply_block(self, block: bytes):
         state = self._state
@@ -73,7 +73,7 @@ class QuickXorHash:
 
     def digest(self):
         """Return the raw 20-byte digest."""
-        final_state = self._state ^ (self._lengthSoFar << 96)
+        final_state = self._state ^ (self._length_so_far << 96)
         return final_state.to_bytes(20, "little")
 
     def b64digest(self):
