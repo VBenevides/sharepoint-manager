@@ -36,7 +36,7 @@ class PublicClient:
             else None
         )
 
-    def acquire_token_by_username_password(self, username, password, scopes):
+    def acquire_token_by_username_password(self, username, password, **_kwargs):
         assert username == _TEST_USERNAME
         assert password == "password"
         self.password_calls += 1
