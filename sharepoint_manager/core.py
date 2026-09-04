@@ -2041,6 +2041,63 @@ class SharepointManager(SharepointManagerBase):
         )
         return result
 
+    def _upload_resumable_chunks(
+        self,
+        source: BinaryIO,
+        upload_url: str,
+        file_size_b: int,
+        start_byte: int = 0,
+    ) -> tuple[requests.Response | None, int]:
+        response: requests.Response | None = None
+        while start_byte < file_size_b:
+            chunk = source.read(min(_UPLOAD_CHUNK_SIZE, file_size_b - start_byte))
+            if not chunk:
+                raise SPValidationError("Upload source ended before its declared size")
+            end_byte = start_byte + len(chunk) - 1
+            response = self._request(
+                "PUT",
+                upload_url,
+                headers={
+                    "Content-Length": str(len(chunk)),
+                    "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size_b}",
+                },
+                timeout=60,
+                data=chunk,
+            )
+            self._raise_for_status(response)
+            next_start = end_byte + 1
+            try:
+                ranges = response.json().get("nextExpectedRanges", [])
+                if ranges:
+                    next_start = int(str(ranges[0]).split("-", 1)[0])
+            except (AttributeError, TypeError, ValueError):
+                pass
+            if next_start < 0 or next_start > file_size_b:
+                raise SPValidationError("Graph returned an invalid upload offset")
+            if next_start != end_byte + 1:
+                source.seek(next_start)
+            start_byte = next_start
+        return response, start_byte
+
+    @staticmethod
+    def _resumable_result(
+        response: requests.Response | None,
+        fallback: SPFile | None,
+        target_folder: SPFolder | None,
+        file_name: str,
+        get_file: Callable[[str, SPFolder], SPFile],
+    ) -> SPFile:
+        if response is None:
+            raise SPAmbiguousWriteError()
+        try:
+            return SPFile.from_dict(response.json())
+        except (TypeError, KeyError, ValueError):
+            if fallback is not None:
+                return fallback
+            if target_folder is not None:
+                return get_file(file_name, target_folder)
+            raise SPAmbiguousWriteError()
+
     def _upload_source_resumable(
         self,
         source: BinaryIO,
@@ -2083,40 +2140,9 @@ class SharepointManager(SharepointManagerBase):
                 )
                 self._raise_for_status(response)
             else:
-                while start_byte < file_size_b:
-                    chunk = source.read(
-                        min(_UPLOAD_CHUNK_SIZE, file_size_b - start_byte)
-                    )
-                    if not chunk:
-                        raise SPValidationError(
-                            "Upload source ended before its declared size"
-                        )
-                    end_byte = start_byte + len(chunk) - 1
-                    response = self._request(
-                        "PUT",
-                        upload_url,
-                        headers={
-                            "Content-Length": str(len(chunk)),
-                            "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size_b}",
-                        },
-                        timeout=60,
-                        data=chunk,
-                    )
-                    self._raise_for_status(response)
-                    next_start = end_byte + 1
-                    try:
-                        ranges = response.json().get("nextExpectedRanges", [])
-                        if ranges:
-                            next_start = int(str(ranges[0]).split("-", 1)[0])
-                    except (AttributeError, TypeError, ValueError):
-                        pass
-                    if next_start < 0 or next_start > file_size_b:
-                        raise SPValidationError(
-                            "Graph returned an invalid upload offset"
-                        )
-                    if next_start != end_byte + 1:
-                        source.seek(next_start)
-                    start_byte = next_start
+                response, start_byte = self._upload_resumable_chunks(
+                    source, upload_url, file_size_b
+                )
         except Exception as exc:  # noqa: BLE001
             if upload_url is not None:
                 try:
@@ -2134,17 +2160,13 @@ class SharepointManager(SharepointManagerBase):
                 failure_class=type(exc).__name__,
             )
             raise SPAmbiguousWriteError() from None
-        if response is None:
-            raise SPAmbiguousWriteError()
-        try:
-            result = SPFile.from_dict(response.json())
-        except (TypeError, KeyError, ValueError):
-            if fallback is not None:
-                result = fallback
-            elif target_folder is not None:
-                result = self._get_file(file_name, target_folder)
-            else:
-                raise SPAmbiguousWriteError()
+        result = self._resumable_result(
+            response,
+            fallback,
+            target_folder,
+            file_name,
+            self._get_file,
+        )
         self._emit_telemetry(
             "transfer",
             operation="upload",
