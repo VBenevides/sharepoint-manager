@@ -30,6 +30,7 @@ from sharepoint_manager.exceptions import (
 )
 
 _DEMO_SITE_URL = "https://tenant.sharepoint.com/sites/demo"
+_GRAPH_ITEMS_URL = "https://graph.microsoft.com/v1.0/items"
 
 
 class Response:
@@ -264,15 +265,13 @@ async def _check_retries(manager: AsyncSharepointManager) -> None:
 
     manager._request = fake_request
     async_core.asyncio.sleep = fake_sleep
-    post = await manager._retry_request(
-        "POST", "https://graph.microsoft.com/v1.0/items"
-    )
+    post = await manager._retry_request("POST", _GRAPH_ITEMS_URL)
     assert post.status_code == 503
     assert len(calls) == 1
     calls.clear()
     transient = RetryResponse(503)
     responses[:] = [transient, RetryResponse(200)]
-    put = await manager._retry_request("PUT", "https://graph.microsoft.com/v1.0/items")
+    put = await manager._retry_request("PUT", _GRAPH_ITEMS_URL)
     assert put.status_code == 200
     assert len(calls) == 2
     assert sleeps and sleeps[0] <= 0.01
@@ -281,9 +280,7 @@ async def _check_retries(manager: AsyncSharepointManager) -> None:
 
     responses[:] = [RetryResponse(503, retry_after="0"), RetryResponse(200)]
     calls.clear()
-    immediate = await manager._retry_request(
-        "PUT", "https://graph.microsoft.com/v1.0/items"
-    )
+    immediate = await manager._retry_request("PUT", _GRAPH_ITEMS_URL)
     assert immediate.status_code == 200
     assert len(calls) == 2
 
@@ -300,7 +297,7 @@ async def _check_retries(manager: AsyncSharepointManager) -> None:
     manager._request = slow_request
     started = time.monotonic()
     try:
-        await manager._retry_request("PUT", "https://graph.microsoft.com/v1.0/items")
+        await manager._retry_request("PUT", _GRAPH_ITEMS_URL)
     except SPDeadlineExceeded:
         assert time.monotonic() - started < 0.1
     else:
