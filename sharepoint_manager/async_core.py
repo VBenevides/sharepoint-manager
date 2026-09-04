@@ -57,6 +57,7 @@ _CHUNK_SIZE = 20 * 327680
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
 _RETRY_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT"})
+_GRAPH_CONFLICT_BEHAVIOR = "@microsoft.graph.conflictBehavior"
 logger = logging.getLogger(__name__)
 
 
@@ -735,7 +736,7 @@ class AsyncSharepointManager:
             json={
                 "name": name,
                 "folder": {},
-                "@microsoft.graph.conflictBehavior": "fail",
+                _GRAPH_CONFLICT_BEHAVIOR: "fail",
             },
         )
         self._raise_for_status(response)
@@ -767,7 +768,7 @@ class AsyncSharepointManager:
                 "PUT",
                 url,
                 headers={"Content-Length": str(size)},
-                params={"@microsoft.graph.conflictBehavior": "replace"},
+                params={_GRAPH_CONFLICT_BEHAVIOR: "replace"},
                 content=path.read_bytes(),
             )
             try:
@@ -784,7 +785,7 @@ class AsyncSharepointManager:
             "POST",
             f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}:/{path.name}:/createUploadSession",
             headers={"Content-Type": "application/json"},
-            json={"item": {"@microsoft.graph.conflictBehavior": "replace"}},
+            json={"item": {_GRAPH_CONFLICT_BEHAVIOR: "replace"}},
         )
         self._raise_for_status(session_response)
         upload_url = session_response.json()["uploadUrl"]
