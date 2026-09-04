@@ -129,7 +129,7 @@ class Client:
 
 
 class StreamingResponse(Response):
-    async def aiter_bytes(self, chunk_size):
+    async def aiter_bytes(self, _chunk_size):
         await asyncio.sleep(0.02)
         yield self.content
 
