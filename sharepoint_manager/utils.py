@@ -33,11 +33,11 @@ class QuickXorHash:
         array : bytes
             Bytes to include in the digest.
         """
-        cbSize = len(array)
-        if cbSize == 0:
+        cb_size = len(array)
+        if cb_size == 0:
             return
 
-        limit = (cbSize // 160) * 160
+        limit = (cb_size // 160) * 160
 
         if limit > 0:
             accum = 0
@@ -51,10 +51,10 @@ class QuickXorHash:
             self._apply_block(collapsed)
 
         # 2. Process any remaining bytes at the end of the chunk
-        if cbSize > limit:
+        if cb_size > limit:
             self._apply_block(array[limit:])
 
-        self._length_so_far += cbSize
+        self._length_so_far += cb_size
 
     def _apply_block(self, block: bytes):
         state = self._state
