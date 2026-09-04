@@ -23,7 +23,7 @@ class QuickXorHash:
         """Initialize an empty digest state."""
         self._state = 0
         self._length_so_far = 0
-        self._shiftSoFar = 0
+        self._shift_so_far = 0
 
     def update(self, array: bytes):
         """Add bytes to the rolling QuickXorHash state.
@@ -58,7 +58,7 @@ class QuickXorHash:
 
     def _apply_block(self, block: bytes):
         state = self._state
-        shift = self._shiftSoFar
+        shift = self._shift_so_far
         mask = self._MASK_160
 
         for b in block:
@@ -69,7 +69,7 @@ class QuickXorHash:
                 shift -= 160
 
         self._state = state
-        self._shiftSoFar = shift
+        self._shift_so_far = shift
 
     def digest(self):
         """Return the raw 20-byte digest."""
