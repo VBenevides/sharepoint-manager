@@ -198,6 +198,33 @@ class AsyncSharepointManager:
         except Exception:  # noqa: BLE001
             return
 
+    async def _get_token_result(self) -> Any:
+        if self._token_provider is not None:
+            result = self._token_provider.get_token(
+                f"https://{self.graph_host}/.default"
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        return await self._acquire_msal_token()
+
+    def _cache_token(self, result: Any, now: int) -> str:
+        if not isinstance(result, dict):
+            expires_on = int(getattr(result, "expires_on", 0) or 0)
+            result = {
+                "access_token": getattr(result, "token", None),
+                "expires_on": expires_on,
+                "expires_in": max(expires_on - now, 60) if expires_on else 3600,
+            }
+        if "access_token" not in result:
+            raise SPAuthenticationError("Authentication failed")
+        self._cached_token = str(result["access_token"])
+        expires_on = int(result.get("expires_on", 0) or 0)
+        if not expires_on:
+            expires_on = now + max(int(result.get("expires_in", 3600) or 3600), 60)
+        self._cached_token_expiry = expires_on
+        return self._cached_token
+
     async def _ensure_token(self) -> str:
         now = int(time.time())
         if self._cached_token and self._cached_token_expiry - now > 120:
@@ -208,30 +235,8 @@ class AsyncSharepointManager:
             if self._cached_token and self._cached_token_expiry - now > 120:
                 return self._cached_token
 
-            if self._token_provider is not None:
-                result = self._token_provider.get_token(
-                    f"https://{self.graph_host}/.default"
-                )
-                if inspect.isawaitable(result):
-                    result = await result
-            else:
-                result = await self._acquire_msal_token()
-
-            if not isinstance(result, dict):
-                token = getattr(result, "token", None)
-                expires_on = int(getattr(result, "expires_on", 0) or 0)
-                result = {
-                    "access_token": token,
-                    "expires_on": expires_on,
-                    "expires_in": max(expires_on - now, 60) if expires_on else 3600,
-                }
-            if not isinstance(result, dict) or "access_token" not in result:
-                raise SPAuthenticationError("Authentication failed")
-            self._cached_token = str(result["access_token"])
-            expires_on = int(result.get("expires_on", 0) or 0)
-            if not expires_on:
-                expires_on = now + max(int(result.get("expires_in", 3600) or 3600), 60)
-            self._cached_token_expiry = expires_on
+            result = await self._get_token_result()
+            self._cache_token(result, now)
             self._emit("auth.token_refresh", success=True)
             return self._cached_token
 
