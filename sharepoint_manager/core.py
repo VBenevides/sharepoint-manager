@@ -89,6 +89,7 @@ _DIRECT_UPLOAD_MAX_BYTES = _UPLOAD_CHUNK_SIZE
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _GRAPH_REQUEST_DEADLINE_EXCEEDED = "Graph request deadline exceeded"
 _GRAPH_PAGE_EVENT = "graph.page"
+_GRAPH_ITEM_BUDGET_EXCEEDED = "Graph item budget exceeded"
 # GUID pattern used to extract a tenant id from authorization URIs.
 _GUID_RE = re.compile(r"/([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})")
 
@@ -721,7 +722,7 @@ class SharepointManagerBase:
             for item in data.get("value", []):
                 item_count += 1
                 if item_count > policy.max_items:
-                    raise SPValidationError("Graph item budget exceeded")
+                    raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
                 yield item
             next_url = data.get("@odata.nextLink")
 
@@ -755,7 +756,7 @@ class SharepointManagerBase:
             values = tuple(payload.get("value", []))
             item_count += len(values)
             if item_count > policy.max_items:
-                raise SPValidationError("Graph item budget exceeded")
+                raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
             page_count += 1
             self._emit_telemetry(
                 _GRAPH_PAGE_EVENT,
@@ -810,7 +811,7 @@ class SharepointManagerBase:
                     folders.append(SPFolder.from_dict(item))
             item_count += len(files) + len(folders) + len(deleted)
             if item_count > policy.max_items:
-                raise SPValidationError("Graph item budget exceeded")
+                raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
             next_page = payload.get("@odata.nextLink")
             checkpoint = payload.get("@odata.deltaLink")
             if checkpoint is not None:
