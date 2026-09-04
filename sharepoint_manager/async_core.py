@@ -554,6 +554,21 @@ class AsyncSharepointManager:
             not_found=not_found,
         )
 
+    def _store_children(
+        self,
+        values: list[dict[str, Any]],
+        files: dict[str, SPFile],
+        folders: dict[str, SPFolder],
+    ) -> None:
+        for item in values:
+            self._validate_boundary(item)
+            if "file" in item:
+                file = SPFile.from_dict(item)
+                files[file.name] = file
+            elif "folder" in item:
+                child = SPFolder.from_dict(item)
+                folders[child.name] = child
+
     async def _children(
         self, folder: SPFolder, budget: dict[str, Any] | None = None
     ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
@@ -589,14 +604,7 @@ class AsyncSharepointManager:
             item_count += len(values)
             if item_count > self.policy.max_items:
                 raise SPValidationError("Graph item budget exceeded")
-            for item in values:
-                self._validate_boundary(item)
-                if "file" in item:
-                    file = SPFile.from_dict(item)
-                    files[file.name] = file
-                elif "folder" in item:
-                    child = SPFolder.from_dict(item)
-                    folders[child.name] = child
+            self._store_children(values, files, folders)
             next_url = data.get("@odata.nextLink")
             if next_url is not None and not isinstance(next_url, str):
                 raise SPValidationError("Invalid Graph pagination link")
