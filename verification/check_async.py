@@ -53,6 +53,65 @@ class Client:
         self.active = 0
         self.max_active = 0
 
+    def _metadata_response(self, method, url, kwargs):
+        if url.endswith("/sites/demo"):
+            return Response({"id": "site"})
+        if url.endswith("/sites/site/drive"):
+            return Response(
+                {
+                    "id": "drive",
+                    "name": "Documents",
+                    "webUrl": f"{_DEMO_SITE_URL}/Documents",
+                }
+            )
+        if "/shares/" in url:
+            share_id = url.split("/shares/", 1)[1].split("/", 1)[0]
+            return Response(self.items[share_id])
+        if "/root:/" in url:
+            name = unquote(url.rsplit("/", 1)[-1])
+            return Response(
+                next(item for item in self.items.values() if item.get("name") == name)
+            )
+        if "/children" in url:
+            if method == "POST":
+                return Response(
+                    {
+                        "id": "created-folder",
+                        "name": kwargs["json"]["name"],
+                        "folder": {},
+                        "parentReference": {"driveId": "drive"},
+                    }
+                )
+            children = self.children.get(url, [])
+            return Response(
+                children if isinstance(children, dict) else {"value": children}
+            )
+        return None
+
+    async def _transfer_response(self, method, url, kwargs):
+        if method == "POST" and url.endswith("createUploadSession"):
+            return Response(
+                {"uploadUrl": "https://tenant.sharepoint.com/upload/session"}
+            )
+        if method == "PUT" and url.endswith("/content"):
+            data = kwargs.get("content", b"")
+            self.uploaded[url] = data
+            return Response({"id": "direct", "name": "direct.bin", "size": len(data)})
+        if method == "PUT" and "/upload/" in url:
+            data = kwargs.get("content", b"")
+            self.uploaded[url] = self.uploaded.get(url, b"") + data
+            return Response(
+                {
+                    "id": "uploaded",
+                    "name": "uploaded.bin",
+                    "size": len(self.uploaded[url]),
+                }
+            )
+        if "/download/" in url:
+            await asyncio.sleep(0.02)
+            return Response(content=b"payload")
+        return Response()
+
     async def request(self, method, url, **kwargs):
         self.requests.append((method, url))
         self.active += 1
@@ -60,63 +119,10 @@ class Client:
         try:
             if self.request_latency:
                 await asyncio.sleep(self.request_latency)
-            if url.endswith("/sites/demo"):
-                return Response({"id": "site"})
-            if url.endswith("/sites/site/drive"):
-                return Response(
-                    {
-                        "id": "drive",
-                        "name": "Documents",
-                        "webUrl": f"{_DEMO_SITE_URL}/Documents",
-                    }
-                )
-            if "/shares/" in url:
-                share_id = url.split("/shares/", 1)[1].split("/", 1)[0]
-                return Response(self.items[share_id])
-            if "/root:/" in url:
-                name = unquote(url.rsplit("/", 1)[-1])
-                return Response(
-                    next(
-                        item for item in self.items.values() if item.get("name") == name
-                    )
-                )
-            if "/children" in url:
-                if method == "POST":
-                    return Response(
-                        {
-                            "id": "created-folder",
-                            "name": kwargs["json"]["name"],
-                            "folder": {},
-                            "parentReference": {"driveId": "drive"},
-                        }
-                    )
-                children = self.children.get(url, [])
-                return Response(
-                    children if isinstance(children, dict) else {"value": children}
-                )
-            if method == "POST" and url.endswith("createUploadSession"):
-                upload_url = "https://tenant.sharepoint.com/upload/session"
-                return Response({"uploadUrl": upload_url})
-            if method == "PUT" and url.endswith("/content"):
-                data = kwargs.get("content", b"")
-                self.uploaded[url] = data
-                return Response(
-                    {"id": "direct", "name": "direct.bin", "size": len(data)}
-                )
-            if method == "PUT" and "/upload/" in url:
-                data = kwargs.get("content", b"")
-                self.uploaded[url] = self.uploaded.get(url, b"") + data
-                return Response(
-                    {
-                        "id": "uploaded",
-                        "name": "uploaded.bin",
-                        "size": len(self.uploaded[url]),
-                    }
-                )
-            if "/download/" in url:
-                await asyncio.sleep(0.02)
-                return Response(content=b"payload")
-            return Response()
+            response = self._metadata_response(method, url, kwargs)
+            if response is not None:
+                return response
+            return await self._transfer_response(method, url, kwargs)
         finally:
             self.active -= 1
 
