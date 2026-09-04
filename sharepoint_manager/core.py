@@ -2118,6 +2118,14 @@ class SharepointManager(SharepointManagerBase):
                 return get_file(file_name, target_folder)
             raise SPAmbiguousWriteError()
 
+    def _cleanup_upload_session(self, upload_url: str | None) -> None:
+        if upload_url is None:
+            return
+        try:
+            self._request("DELETE", upload_url, timeout=30)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
     def _upload_source_resumable(
         self,
         source: BinaryIO,
@@ -2164,11 +2172,7 @@ class SharepointManager(SharepointManagerBase):
                     source, upload_url, file_size_b
                 )
         except Exception as exc:  # noqa: BLE001
-            if upload_url is not None:
-                try:
-                    self._request("DELETE", upload_url, timeout=30)
-                except Exception:  # noqa: BLE001, S110
-                    pass
+            self._cleanup_upload_session(upload_url)
             self._emit_telemetry(
                 "transfer",
                 operation="upload",
