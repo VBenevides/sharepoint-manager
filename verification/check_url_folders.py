@@ -20,6 +20,7 @@ from sharepoint_manager.exceptions import (
 
 _SHARES_PATH = "/shares/"
 _DRIVE_ROOT_PATH = "/drives/drive-a/root:/"
+_CHILDREN_PATH = "/children"
 
 
 class Response:
@@ -63,7 +64,7 @@ def _configure_manager():
         calls.append((method, url, kwargs))
         if _SHARES_PATH in url or _DRIVE_ROOT_PATH in url:
             return Response(folder)
-        if method == "GET" and url.endswith("/children"):
+        if method == "GET" and url.endswith(_CHILDREN_PATH):
             next_url = manager._graph_base_url + "/v1.0/children?p=2"
             return Response(
                 {
@@ -73,7 +74,7 @@ def _configure_manager():
             )
         if url.endswith("/children?p=2"):
             return Response({"value": [{"id": "sub-a", "name": "Sub", "folder": {}}]})
-        if method == "POST" and url.endswith("/children"):
+        if method == "POST" and url.endswith(_CHILDREN_PATH):
             return Response(
                 {
                     "id": "new-folder",
@@ -144,7 +145,7 @@ def _check_deletions(manager, share_url, folder):
     def delete_request(method, url, **kwargs):
         if _SHARES_PATH in url or _DRIVE_ROOT_PATH in url:
             return Response(folder)
-        if url.endswith("/children"):
+        if url.endswith(_CHILDREN_PATH):
             return Response({"value": []})
         deleted.append((method, url))
         return Response({})
@@ -158,7 +159,7 @@ def _check_deletions(manager, share_url, folder):
     def force_delete_request(method, url, **kwargs):
         if _SHARES_PATH in url or _DRIVE_ROOT_PATH in url:
             return Response(folder)
-        if url.endswith("/children"):
+        if url.endswith(_CHILDREN_PATH):
             child_lists.append(url)
             return Response({"value": [{"id": "should-not-be-read"}]})
         deleted.append((method, url))
