@@ -5,6 +5,7 @@ import tempfile
 import time
 import types
 import warnings
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -534,14 +535,11 @@ async def _check_cancellation(
         )
         await cancellation_client.stream_started.wait()
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        await task
     finally:
         del client.stream
-    assert not cancelled.exists()
-    assert not list(Path(directory).glob(".sp-async-download-*"))
+        assert not cancelled.exists()
+        assert not list(Path(directory).glob(".sp-async-download-*"))
 
 
 async def _check_file_operations(
@@ -564,7 +562,8 @@ async def _check_file_operations(
             manager, client, folder_url, foreign_url, file_payload, directory
         )
         await _check_stream_cleanup(manager, client, file_url, folder_url, directory)
-        await _check_cancellation(manager, client, file_url, directory)
+        with suppress(asyncio.CancelledError):
+            await _check_cancellation(manager, client, file_url, directory)
 
 
 async def main() -> None:
