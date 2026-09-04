@@ -28,8 +28,8 @@ def main() -> None:
     manager._token_provider = provider
     manager._closed = False
     manager._close_lock = __import__("threading").Lock()
-    with manager:
-        pass
+    with manager as entered:
+        assert entered is manager
     manager.close()
     assert session.closed == 1
     assert provider.closed == 1
