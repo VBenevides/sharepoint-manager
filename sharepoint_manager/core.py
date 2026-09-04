@@ -88,6 +88,7 @@ _DIRECT_UPLOAD_MAX_BYTES = _UPLOAD_CHUNK_SIZE
 # Streaming download chunk size.
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _GRAPH_REQUEST_DEADLINE_EXCEEDED = "Graph request deadline exceeded"
+_GRAPH_PAGE_EVENT = "graph.page"
 # GUID pattern used to extract a tenant id from authorization URIs.
 _GUID_RE = re.compile(r"/([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})")
 
@@ -711,7 +712,7 @@ class SharepointManagerBase:
             page_count += 1
             page_items = len(data.get("value", []))
             self._emit_telemetry(
-                "graph.page",
+                _GRAPH_PAGE_EVENT,
                 operation="collection",
                 page=page_count,
                 items=page_items,
@@ -757,7 +758,7 @@ class SharepointManagerBase:
                 raise SPValidationError("Graph item budget exceeded")
             page_count += 1
             self._emit_telemetry(
-                "graph.page",
+                _GRAPH_PAGE_EVENT,
                 operation="collection",
                 page=page_count,
                 items=len(values),
@@ -816,7 +817,7 @@ class SharepointManagerBase:
                 self._validate_graph_url(checkpoint)
             page_count += 1
             self._emit_telemetry(
-                "graph.page",
+                _GRAPH_PAGE_EVENT,
                 operation="delta",
                 page=page_count,
                 items=len(files) + len(folders) + len(deleted),
