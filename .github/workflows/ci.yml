@@ -78,7 +78,7 @@ jobs:
         run: python -m build --sdist --wheel
       - name: Install and inspect wheel
         run: |
-          python -m pip install dist/*.whl
+          python -m pip install --no-deps dist/*.whl
           python -m pip check
           python -c "import sharepoint_manager; print(sharepoint_manager.__version__)"
           twine check --strict dist/*
