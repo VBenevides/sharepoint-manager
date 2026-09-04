@@ -18,6 +18,8 @@ from sharepoint_manager.exceptions import (
     SPValidationError,
 )
 
+_SHARES_PATH = "/shares/"
+
 
 class Response:
     status_code = 200
@@ -58,7 +60,7 @@ def _configure_manager():
 
     def request(method, url, **kwargs):
         calls.append((method, url, kwargs))
-        if "/shares/" in url or "/drives/drive-a/root:/" in url:
+        if _SHARES_PATH in url or "/drives/drive-a/root:/" in url:
             return Response(folder)
         if method == "GET" and url.endswith("/children"):
             next_url = manager._graph_base_url + "/v1.0/children?p=2"
@@ -126,7 +128,7 @@ def _check_deletions(manager, share_url, folder):
 
     manager._request = lambda method, url, **kwargs: (
         Response(folder)
-        if "/shares/" in url or "/drives/drive-a/root:/" in url
+        if _SHARES_PATH in url or "/drives/drive-a/root:/" in url
         else Response({"value": [{"id": "file-a", "name": "a.txt", "file": {}}]})
     )
     try:
@@ -139,7 +141,7 @@ def _check_deletions(manager, share_url, folder):
     deleted = []
 
     def delete_request(method, url, **kwargs):
-        if "/shares/" in url or "/drives/drive-a/root:/" in url:
+        if _SHARES_PATH in url or "/drives/drive-a/root:/" in url:
             return Response(folder)
         if url.endswith("/children"):
             return Response({"value": []})
@@ -153,7 +155,7 @@ def _check_deletions(manager, share_url, folder):
     child_lists = []
 
     def force_delete_request(method, url, **kwargs):
-        if "/shares/" in url or "/drives/drive-a/root:/" in url:
+        if _SHARES_PATH in url or "/drives/drive-a/root:/" in url:
             return Response(folder)
         if url.endswith("/children"):
             child_lists.append(url)
