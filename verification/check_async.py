@@ -242,6 +242,7 @@ class RetryResponse:
         self.closed = False
 
     async def aclose(self):
+        await asyncio.sleep(0)
         self.closed = True
 
 
