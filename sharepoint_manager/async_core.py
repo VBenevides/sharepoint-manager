@@ -164,6 +164,7 @@ class AsyncSharepointManager:
                     "AsyncSharepointManager requires the httpx dependency"
                 ) from exc
             self._client = httpx.AsyncClient(follow_redirects=False)
+            await asyncio.sleep(0)
         return self._client
 
     def _validate_graph_url(self, url: str) -> None:
