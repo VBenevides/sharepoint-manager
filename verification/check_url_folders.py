@@ -21,6 +21,7 @@ from sharepoint_manager.exceptions import (
 _SHARES_PATH = "/shares/"
 _DRIVE_ROOT_PATH = "/drives/drive-a/root:/"
 _CHILDREN_PATH = "/children"
+_FILE_NAME = "a.txt"
 
 
 class Response:
@@ -68,7 +69,7 @@ def _configure_manager():
             next_url = manager._graph_base_url + "/v1.0/children?p=2"
             return Response(
                 {
-                    "value": [{"id": "file-a", "name": "a.txt", "file": {}}],
+                    "value": [{"id": "file-a", "name": _FILE_NAME, "file": {}}],
                     "@odata.nextLink": next_url,
                 }
             )
@@ -112,7 +113,7 @@ def _check_folder_metadata(manager, share_url, calls):
     assert manager.get_folder_metadata_from_url(redirect_url).id == "folder-a"
     assert any("/drives/drive-a/root:/Folder%20%231" in url for _, url, _ in calls)
     files, folders = manager.list_folder_from_url(share_url)
-    assert set(files) == {"a.txt"} and set(folders) == {"Sub"}
+    assert set(files) == {_FILE_NAME} and set(folders) == {"Sub"}
     created = manager.create_folder_from_url(share_url, "New #1")
     assert created.name == "New #1"
     permissions = manager.get_folder_permissions_from_url(share_url)
@@ -131,7 +132,7 @@ def _check_deletions(manager, share_url, folder):
     manager._request = lambda method, url, **kwargs: (
         Response(folder)
         if _SHARES_PATH in url or _DRIVE_ROOT_PATH in url
-        else Response({"value": [{"id": "file-a", "name": "a.txt", "file": {}}]})
+        else Response({"value": [{"id": "file-a", "name": _FILE_NAME, "file": {}}]})
     )
     try:
         manager.delete_folder_from_url(share_url)
@@ -183,7 +184,7 @@ def _check_boundaries(manager, share_url, folder):
 
     file_obj = SPFile(
         id="file-a",
-        name="a.txt",
+        name=_FILE_NAME,
         parent_reference={"siteId": "site-a", "driveId": "drive-a"},
     )
     manager.get_file_metadata_from_url = lambda url: file_obj
@@ -220,7 +221,7 @@ def _check_transfer_adapters(manager, share_url, file_obj):
         ("download_folder", path, kwargs)
     )
     with tempfile.TemporaryDirectory() as directory:
-        local_file = Path(directory) / "a.txt"
+        local_file = Path(directory) / _FILE_NAME
         local_file.write_bytes(b"data")
         local_folder = Path(directory) / "tree"
         local_folder.mkdir()
