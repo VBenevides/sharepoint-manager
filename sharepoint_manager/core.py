@@ -211,6 +211,89 @@ class SharepointManagerBase:
 
         raise RuntimeError("Cannot determine tenant id from WWW-Authenticate header")
 
+    def _provider_token_result(self, now: int) -> dict[str, Any]:
+        result = self._token_provider.get_token(f"https://{self.graph_host}/.default")
+        token_value = getattr(result, "token", result)
+        expires_on = int(getattr(result, "expires_on", 0) or 0)
+        if isinstance(result, dict):
+            token_value = result.get("access_token", result.get("token"))
+            expires_on = int(result.get("expires_on", 0) or 0)
+        return {
+            "access_token": token_value,
+            "expires_on": expires_on,
+            "expires_in": max(expires_on - now, 60) if expires_on else 3600,
+        }
+
+    def _get_public_account(self) -> Any:
+        if getattr(self, "_account", None) is None:
+            accounts = self.ca.get_accounts(username=self._username)
+            self._account = accounts[0] if accounts else None
+        return self._account
+
+    def _acquire_public_password_token(self, scopes: list[str]) -> Any:
+        if not self._warned_password_auth:
+            warnings.warn(
+                "Username/password authentication is deprecated and not recommended; "
+                "ROPC does not support MFA or Conditional Access, and the password "
+                "is used only for initial token bootstrap.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._warned_password_auth = True
+        if self._password is None:
+            raise SPAuthenticationError(
+                "Silent authentication failed; credentials must be supplied again"
+            )
+        result = self.ca.acquire_token_by_username_password(
+            username=self._username,
+            password=self._password,
+            scopes=scopes,
+        )
+        if isinstance(result, dict) and "access_token" in result:
+            self._password = None
+            self.credentials = None
+            self._get_public_account()
+        return result
+
+    def _acquire_public_token(self) -> Any:
+        scopes = [f"https://{self.graph_host}/.default"]
+        account = self._get_public_account()
+        if account is not None:
+            result = self.ca.acquire_token_silent(scopes=scopes, account=account)
+            if isinstance(result, dict) and "access_token" in result:
+                self._password = None
+                self.credentials = None
+                return result
+        return self._acquire_public_password_token(scopes)
+
+    def _acquire_token(self, now: int) -> Any:
+        if self._token_provider is not None:
+            return self._provider_token_result(now)
+        if isinstance(self.ca, PublicClientApplication):
+            return self._acquire_public_token()
+        return self.ca.acquire_token_for_client(
+            scopes=[f"https://{self.graph_host}/.default"]
+        )
+
+    def _cache_acquired_token(self, result: Any, now: int) -> str:
+        if not isinstance(result, dict) or "access_token" not in result:
+            raise SPAuthenticationError("Authentication failed")
+
+        token = str(result["access_token"])
+        try:
+            expires_on = int(result.get("expires_on", 0))
+        except (TypeError, ValueError):
+            expires_on = 0
+        if not expires_on:
+            try:
+                expires_in = int(result.get("expires_in", 3600))
+            except (TypeError, ValueError):
+                expires_in = 3600
+            expires_on = now + max(expires_in, 60)
+        self._cached_token = token
+        self._cached_token_expiry = int(expires_on)
+        return token
+
     def _ensure_token(self) -> str:
         # Fast path – lock-free read of the cached token.
         now = int(time.time())
@@ -229,85 +312,8 @@ class SharepointManagerBase:
             if cached_token and (cached_expiry - now) > 120:
                 return str(cached_token)
 
-            # Acquire a new token. Injected providers cover managed identity,
-            # workload federation, certificates, and application-specific flows.
-            if self._token_provider is not None:
-                result = self._token_provider.get_token(
-                    f"https://{self.graph_host}/.default"
-                )
-                token_value = getattr(result, "token", result)
-                expires_on = int(getattr(result, "expires_on", 0) or 0)
-                if isinstance(result, dict):
-                    token_value = result.get("access_token", result.get("token"))
-                    expires_on = int(result.get("expires_on", 0) or 0)
-                result = {
-                    "access_token": token_value,
-                    "expires_on": expires_on,
-                    "expires_in": max(expires_on - now, 60) if expires_on else 3600,
-                }
-            elif isinstance(self.ca, PublicClientApplication):
-                scopes = [f"https://{self.graph_host}/.default"]
-                result = None
-                if getattr(self, "_account", None) is None:
-                    accounts = self.ca.get_accounts(username=self._username)
-                    self._account = accounts[0] if accounts else None
-                if self._account is not None:
-                    result = self.ca.acquire_token_silent(
-                        scopes=scopes, account=self._account
-                    )
-                    if isinstance(result, dict) and "access_token" in result:
-                        self._password = None
-                        self.credentials = None
-                    else:
-                        result = None
-                if not isinstance(result, dict) or "access_token" not in result:
-                    if not self._warned_password_auth:
-                        warnings.warn(
-                            "Username/password authentication is deprecated and not recommended; "
-                            "ROPC does not support MFA or Conditional Access, and the password "
-                            "is used only for initial token bootstrap.",
-                            UserWarning,
-                            stacklevel=2,
-                        )
-                        self._warned_password_auth = True
-                    if self._password is None:
-                        raise SPAuthenticationError(
-                            "Silent authentication failed; credentials must be supplied again"
-                        )
-                    result = self.ca.acquire_token_by_username_password(
-                        username=self._username,
-                        password=self._password,
-                        scopes=scopes,
-                    )
-                    if isinstance(result, dict) and "access_token" in result:
-                        self._password = None
-                        self.credentials = None
-                        accounts = self.ca.get_accounts(username=self._username)
-                        self._account = accounts[0] if accounts else None
-            else:
-                result = self.ca.acquire_token_for_client(
-                    scopes=[f"https://{self.graph_host}/.default"]
-                )
-
-            if not isinstance(result, dict) or "access_token" not in result:
-                raise SPAuthenticationError("Authentication failed")
-
-            token = str(result["access_token"])
-            # Prefer 'expires_on' (epoch seconds as str) else compute from 'expires_in'
-            try:
-                expires_on = int(result.get("expires_on", 0))
-            except (TypeError, ValueError):
-                expires_on = 0
-            if not expires_on:
-                try:
-                    expires_in = int(result.get("expires_in", 3600))
-                except (TypeError, ValueError):
-                    expires_in = 3600
-                expires_on = now + max(expires_in, 60)
-
-            # Cache the token and its expiry
-            self._cached_token = token
-            self._cached_token_expiry = int(expires_on)
+            result = self._acquire_token(now)
+            token = self._cache_acquired_token(result, now)
             self._emit_telemetry("auth.token_refresh", success=True)
 
             return token
