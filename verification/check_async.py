@@ -261,6 +261,7 @@ async def _check_retries(manager: AsyncSharepointManager) -> None:
 
     async def fake_request(method, url, **kwargs):
         calls.append((method, kwargs["timeout"]))
+        await original_sleep(0)
         return responses.pop(0)
 
     async def fake_sleep(delay):
