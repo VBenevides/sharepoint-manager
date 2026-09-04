@@ -29,7 +29,7 @@ class Response:
     def json(self):
         return self.body
 
-    def iter_content(self, chunk_size):
+    def iter_content(self, **_kwargs):
         yield from self.chunks
 
     def close(self):
