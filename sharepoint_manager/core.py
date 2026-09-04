@@ -90,6 +90,7 @@ _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _GRAPH_REQUEST_DEADLINE_EXCEEDED = "Graph request deadline exceeded"
 _GRAPH_PAGE_EVENT = "graph.page"
 _GRAPH_ITEM_BUDGET_EXCEEDED = "Graph item budget exceeded"
+_GRAPH_NEXT_LINK = "@odata.nextLink"
 # GUID pattern used to extract a tenant id from authorization URIs.
 _GUID_RE = re.compile(r"/([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})")
 
@@ -682,7 +683,7 @@ class SharepointManagerBase:
     def _paginate(
         self, url: str, _budget: dict[str, Any] | None = None
     ) -> Iterator[dict[str, Any]]:
-        """Yield items across Graph pages following @odata.nextLink."""
+        """Yield items across Graph pages following Graph next links."""
         next_url: str | None = url
         seen: set[str] = set()
         page_count = 0
@@ -724,7 +725,7 @@ class SharepointManagerBase:
                 if item_count > policy.max_items:
                     raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
                 yield item
-            next_url = data.get("@odata.nextLink")
+            next_url = data.get(_GRAPH_NEXT_LINK)
 
     def iter_collection(self, url: str) -> Iterator[SPCollectionPage]:
         """Yield bounded, caller-consumable Graph collection pages."""
@@ -765,7 +766,7 @@ class SharepointManagerBase:
                 items=len(values),
                 total_items=item_count,
             )
-            next_url = payload.get("@odata.nextLink")
+            next_url = payload.get(_GRAPH_NEXT_LINK)
             yield SPCollectionPage(values, next_url)
 
     def iter_folder_delta(
@@ -812,7 +813,7 @@ class SharepointManagerBase:
             item_count += len(files) + len(folders) + len(deleted)
             if item_count > policy.max_items:
                 raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
-            next_page = payload.get("@odata.nextLink")
+            next_page = payload.get(_GRAPH_NEXT_LINK)
             checkpoint = payload.get("@odata.deltaLink")
             if checkpoint is not None:
                 self._validate_graph_url(checkpoint)
