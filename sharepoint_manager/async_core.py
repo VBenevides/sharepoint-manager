@@ -646,7 +646,7 @@ class AsyncSharepointManager:
                             ):  # NOSONAR — no stdlib async file API for mkstemp descriptors
                                 fd = None
                                 async for chunk in chunks:
-                                    await self._consume_chunk(
+                                    self._consume_chunk(
                                         output,
                                         chunk,
                                         digest,
@@ -674,7 +674,7 @@ class AsyncSharepointManager:
                 ):  # NOSONAR — no stdlib async file API for mkstemp descriptors
                     fd = None
                     chunk = response.content
-                    await self._consume_chunk(
+                    self._consume_chunk(
                         output, chunk, digest, budget, downloaded, int(item.size)
                     )
                     downloaded = len(chunk)
@@ -693,7 +693,7 @@ class AsyncSharepointManager:
             except FileNotFoundError:
                 pass
 
-    async def _consume_chunk(
+    def _consume_chunk(
         self,
         output: Any,
         chunk: bytes,
