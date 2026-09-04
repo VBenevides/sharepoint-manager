@@ -87,6 +87,7 @@ _UPLOAD_CHUNK_SIZE = 20 * _GRAPH_CHUNK_UNIT
 _DIRECT_UPLOAD_MAX_BYTES = _UPLOAD_CHUNK_SIZE
 # Streaming download chunk size.
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+_GRAPH_REQUEST_DEADLINE_EXCEEDED = "Graph request deadline exceeded"
 # GUID pattern used to extract a tenant id from authorization URIs.
 _GUID_RE = re.compile(r"/([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})")
 
@@ -464,7 +465,7 @@ class SharepointManagerBase:
             pass
         if time.monotonic() >= deadline:
             raise SPDeadlineExceeded(
-                "Graph request deadline exceeded",
+                _GRAPH_REQUEST_DEADLINE_EXCEEDED,
                 status=response.status_code,
                 request_id=request_id,
                 retryable=True,
@@ -490,7 +491,7 @@ class SharepointManagerBase:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded", retryable=True
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
                 )
             request_started = time.monotonic()
             request_kwargs["timeout"] = self._request_timeout(timeout, remaining)
@@ -512,10 +513,10 @@ class SharepointManagerBase:
                 if time.monotonic() >= deadline:
                     if not authenticated:
                         raise SPDeadlineExceeded(
-                            "Graph request deadline exceeded", retryable=True
+                            _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
                         ) from None
                     raise SPDeadlineExceeded(
-                        "Graph request deadline exceeded",
+                        _GRAPH_REQUEST_DEADLINE_EXCEEDED,
                         retryable=True,
                         cause=exc,
                     ) from exc
@@ -529,7 +530,7 @@ class SharepointManagerBase:
                 status = resp.status_code
                 resp.close()
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded",
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
                     status=status,
                     request_id=request_id,
                     retryable=True,
