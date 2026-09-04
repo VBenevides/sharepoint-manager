@@ -91,6 +91,7 @@ _GRAPH_REQUEST_DEADLINE_EXCEEDED = "Graph request deadline exceeded"
 _GRAPH_PAGE_EVENT = "graph.page"
 _GRAPH_ITEM_BUDGET_EXCEEDED = "Graph item budget exceeded"
 _GRAPH_NEXT_LINK = "@odata.nextLink"
+_INVALID_CONFLICT_BEHAVIOR = "Invalid conflict behavior"
 # GUID pattern used to extract a tenant id from authorization URIs.
 _GUID_RE = re.compile(r"/([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})")
 
@@ -1365,7 +1366,7 @@ class SharepointManager(SharepointManagerBase):
             Uploaded file metadata.
         """
         if conflict_behavior not in {"fail", "replace", "rename"}:
-            raise SPValidationError("Invalid conflict behavior")
+            raise SPValidationError(_INVALID_CONFLICT_BEHAVIOR)
         # 1. Resolve the sharing URL to get Drive and Parent IDs
         file_obj = self.get_file_metadata_from_url(sharing_url)
         drive_id = file_obj.parent_reference["driveId"]
@@ -1804,7 +1805,7 @@ class SharepointManager(SharepointManagerBase):
         if not filename or os.path.basename(filename) != filename:
             raise SPValidationError("filename must be a plain file name")
         if conflict_behavior not in {"fail", "replace", "rename"}:
-            raise SPValidationError("Invalid conflict behavior")
+            raise SPValidationError(_INVALID_CONFLICT_BEHAVIOR)
 
         try:
             source.seek(0, os.SEEK_END)
@@ -2231,7 +2232,7 @@ class SharepointManager(SharepointManagerBase):
         """
 
         if conflict_behavior not in {"fail", "replace", "rename"}:
-            raise SPValidationError("Invalid conflict behavior")
+            raise SPValidationError(_INVALID_CONFLICT_BEHAVIOR)
         local_file_path = os.path.abspath(local_file_path)
         if os.path.islink(local_file_path):
             raise SPValidationError("Symlink upload roots are not allowed")
