@@ -61,6 +61,15 @@ _GRAPH_CONFLICT_BEHAVIOR = "@microsoft.graph.conflictBehavior"
 logger = logging.getLogger(__name__)
 
 
+def _write_fd(fd: int, chunk: bytes) -> None:
+    view = memoryview(chunk)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("file descriptor write made no progress")
+        view = view[written:]
+
+
 class AsyncSharepointManager:
     """Native asyncio client for explicit URL-based SharePoint transfers.
 
@@ -641,20 +650,15 @@ class AsyncSharepointManager:
                             chunks: AsyncIterator[bytes] = response.aiter_bytes(
                                 _DOWNLOAD_CHUNK_SIZE
                             )
-                            with (
-                                os.fdopen(fd, "wb") as output
-                            ):  # NOSONAR — no stdlib async file API for mkstemp descriptors
-                                fd = None
-                                async for chunk in chunks:
-                                    self._consume_chunk(
-                                        output,
-                                        chunk,
-                                        digest,
-                                        budget,
-                                        downloaded,
-                                        int(item.size),
-                                    )
-                                    downloaded += len(chunk)
+                            async for chunk in chunks:
+                                self._check_chunk(
+                                    chunk, budget, downloaded, int(item.size)
+                                )
+                                _write_fd(fd, chunk)
+                                digest.update(chunk)
+                                downloaded += len(chunk)
+                            os.close(fd)
+                            fd = None
                     except (
                         OSError,
                         SPValidationError,
@@ -669,15 +673,13 @@ class AsyncSharepointManager:
                     "GET", item.download_url, authenticated=False
                 )
                 self._raise_for_status(response)
-                with (
-                    os.fdopen(fd, "wb") as output
-                ):  # NOSONAR — no stdlib async file API for mkstemp descriptors
-                    fd = None
-                    chunk = response.content
-                    self._consume_chunk(
-                        output, chunk, digest, budget, downloaded, int(item.size)
-                    )
-                    downloaded = len(chunk)
+                chunk = response.content
+                self._check_chunk(chunk, budget, downloaded, int(item.size))
+                _write_fd(fd, chunk)
+                digest.update(chunk)
+                downloaded = len(chunk)
+                os.close(fd)
+                fd = None
             if downloaded != int(item.size):
                 raise SPValidationError("Downloaded content was incomplete")
             if item.quick_xor_hash and digest.b64digest() != item.quick_xor_hash:
@@ -693,11 +695,9 @@ class AsyncSharepointManager:
             except FileNotFoundError:
                 pass
 
-    def _consume_chunk(
+    def _check_chunk(
         self,
-        output: Any,
         chunk: bytes,
-        digest: QuickXorHash,
         budget: dict[str, Any],
         downloaded: int = 0,
         declared_size: int | None = None,
@@ -712,8 +712,6 @@ class AsyncSharepointManager:
         if budget["bytes"] + len(chunk) > self.policy.max_total_bytes:
             raise SPValidationError("Transfer byte budget exceeded")
         self._consume_budget(budget, byte_count=len(chunk))
-        output.write(chunk)
-        digest.update(chunk)
 
     async def download_file_from_url(self, url: str, destination: str) -> SPFile:
         """Download one approved SharePoint file to an explicit path.
