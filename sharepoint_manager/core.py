@@ -483,6 +483,51 @@ class SharepointManagerBase:
         time.sleep(delay)
         return True
 
+    def _raise_request_failure(
+        self,
+        exc: requests.RequestException,
+        *,
+        authenticated: bool,
+        deadline: float,
+    ) -> None:
+        if time.monotonic() >= deadline:
+            if not authenticated:
+                raise SPDeadlineExceeded(
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
+                ) from None
+            raise SPDeadlineExceeded(
+                _GRAPH_REQUEST_DEADLINE_EXCEEDED,
+                retryable=True,
+                cause=exc,
+            ) from exc
+        if not authenticated:
+            raise SPGraphError("Capability request failed") from None
+        raise exc
+
+    @staticmethod
+    def _raise_response_deadline(response: requests.Response, deadline: float) -> None:
+        if time.monotonic() < deadline:
+            return
+        request_id = response.headers.get("request-id") or response.headers.get(
+            "client-request-id"
+        )
+        status = response.status_code
+        response.close()
+        raise SPDeadlineExceeded(
+            _GRAPH_REQUEST_DEADLINE_EXCEEDED,
+            status=status,
+            request_id=request_id,
+            retryable=True,
+        )
+
+    @staticmethod
+    def _reject_authenticated_redirect(
+        response: requests.Response, authenticated: bool
+    ) -> None:
+        if authenticated and 300 <= response.status_code < 400:
+            response.close()
+            raise SPValidationError("Authenticated Graph redirects are not allowed")
+
     def _request_loop(
         self,
         *,
@@ -520,34 +565,11 @@ class SharepointManagerBase:
                 ):
                     attempt += 1
                     continue
-                if time.monotonic() >= deadline:
-                    if not authenticated:
-                        raise SPDeadlineExceeded(
-                            _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
-                        ) from None
-                    raise SPDeadlineExceeded(
-                        _GRAPH_REQUEST_DEADLINE_EXCEEDED,
-                        retryable=True,
-                        cause=exc,
-                    ) from exc
-                if not authenticated:
-                    raise SPGraphError("Capability request failed") from None
-                raise
-            if time.monotonic() >= deadline:
-                request_id = resp.headers.get("request-id") or resp.headers.get(
-                    "client-request-id"
+                self._raise_request_failure(
+                    exc, authenticated=authenticated, deadline=deadline
                 )
-                status = resp.status_code
-                resp.close()
-                raise SPDeadlineExceeded(
-                    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
-                    status=status,
-                    request_id=request_id,
-                    retryable=True,
-                )
-            if authenticated and 300 <= resp.status_code < 400:
-                resp.close()
-                raise SPValidationError("Authenticated Graph redirects are not allowed")
+            self._raise_response_deadline(resp, deadline)
+            self._reject_authenticated_redirect(resp, authenticated)
             request_id = resp.headers.get("request-id") or resp.headers.get(
                 "client-request-id"
             )
