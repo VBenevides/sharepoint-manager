@@ -802,6 +802,22 @@ class SharepointManagerBase:
             next_url = payload.get(_GRAPH_NEXT_LINK)
             yield SPCollectionPage(values, next_url)
 
+    @staticmethod
+    def _classify_delta_items(
+        items: list[dict[str, Any]],
+    ) -> tuple[list[SPFile], list[SPFolder], list[SPDeletedItem]]:
+        files: list[SPFile] = []
+        folders: list[SPFolder] = []
+        deleted: list[SPDeletedItem] = []
+        for item in items:
+            if "deleted" in item:
+                deleted.append(SPDeletedItem.from_dict(item))
+            elif "file" in item:
+                files.append(SPFile.from_dict(item))
+            elif "folder" in item:
+                folders.append(SPFolder.from_dict(item))
+        return files, folders, deleted
+
     def iter_folder_delta(
         self, sp_relative_folder_path: str = "", delta_link: str | None = None
     ) -> Iterator[SPDeltaPage]:
@@ -833,16 +849,9 @@ class SharepointManagerBase:
                 payload = response.json()
             finally:
                 response.close()
-            files = []
-            folders = []
-            deleted = []
-            for item in payload.get("value", []):
-                if "deleted" in item:
-                    deleted.append(SPDeletedItem.from_dict(item))
-                elif "file" in item:
-                    files.append(SPFile.from_dict(item))
-                elif "folder" in item:
-                    folders.append(SPFolder.from_dict(item))
+            files, folders, deleted = self._classify_delta_items(
+                payload.get("value", [])
+            )
             item_count += len(files) + len(folders) + len(deleted)
             if item_count > policy.max_items:
                 raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
