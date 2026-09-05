@@ -22,8 +22,8 @@ class QuickXorHash:
     def __init__(self):
         """Initialize an empty digest state."""
         self._state = 0
-        self._lengthSoFar = 0
-        self._shiftSoFar = 0
+        self._length_so_far = 0
+        self._shift_so_far = 0
 
     def update(self, array: bytes):
         """Add bytes to the rolling QuickXorHash state.
@@ -33,11 +33,11 @@ class QuickXorHash:
         array : bytes
             Bytes to include in the digest.
         """
-        cbSize = len(array)
-        if cbSize == 0:
+        cb_size = len(array)
+        if cb_size == 0:
             return
 
-        limit = (cbSize // 160) * 160
+        limit = (cb_size // 160) * 160
 
         if limit > 0:
             accum = 0
@@ -51,14 +51,14 @@ class QuickXorHash:
             self._apply_block(collapsed)
 
         # 2. Process any remaining bytes at the end of the chunk
-        if cbSize > limit:
+        if cb_size > limit:
             self._apply_block(array[limit:])
 
-        self._lengthSoFar += cbSize
+        self._length_so_far += cb_size
 
     def _apply_block(self, block: bytes):
         state = self._state
-        shift = self._shiftSoFar
+        shift = self._shift_so_far
         mask = self._MASK_160
 
         for b in block:
@@ -69,11 +69,11 @@ class QuickXorHash:
                 shift -= 160
 
         self._state = state
-        self._shiftSoFar = shift
+        self._shift_so_far = shift
 
     def digest(self):
         """Return the raw 20-byte digest."""
-        final_state = self._state ^ (self._lengthSoFar << 96)
+        final_state = self._state ^ (self._length_so_far << 96)
         return final_state.to_bytes(20, "little")
 
     def b64digest(self):

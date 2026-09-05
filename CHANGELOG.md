@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.3] - 2026-09-04
+
+### Bugfixes
+
+- Made async descriptor-backed downloads handle partial writes, cleanup, and
+  cancellation reliably.
+- Preserved request deadlines, retries, authentication, pagination, upload,
+  download, and boundary validation behavior while simplifying their flows.
+
+### Other
+
+- Added reproducible uv dependency locking for CI, release, and artifact
+  tooling, removing unpinned dependency upgrades.
+- Added Python SonarQube analysis with an 85% coverage gate and generated
+  coverage reporting.
+- Expanded offline verification and edge-case tests for synchronous and
+  asynchronous operations.
+
 ## [0.1.2] - 2026-08-25
 
 ### Features

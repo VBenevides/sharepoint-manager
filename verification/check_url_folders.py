@@ -18,6 +18,11 @@ from sharepoint_manager.exceptions import (
     SPValidationError,
 )
 
+_SHARES_PATH = "/shares/"
+_DRIVE_ROOT_PATH = "/drives/drive-a/root:/"
+_CHILDREN_PATH = "/children"
+_FILE_NAME = "a.txt"
+
 
 class Response:
     status_code = 200
@@ -33,7 +38,7 @@ class Response:
         return None
 
 
-def main() -> None:
+def _configure_manager():
     manager = object.__new__(SharepointManager)
     manager.graph_host = "graph.microsoft.com"
     manager._graph_base_url = "https://graph.microsoft.com/v1.0"
@@ -58,19 +63,19 @@ def main() -> None:
 
     def request(method, url, **kwargs):
         calls.append((method, url, kwargs))
-        if "/shares/" in url or "/drives/drive-a/root:/" in url:
+        if _SHARES_PATH in url or _DRIVE_ROOT_PATH in url:
             return Response(folder)
-        if method == "GET" and url.endswith("/children"):
+        if method == "GET" and url.endswith(_CHILDREN_PATH):
             next_url = manager._graph_base_url + "/v1.0/children?p=2"
             return Response(
                 {
-                    "value": [{"id": "file-a", "name": "a.txt", "file": {}}],
+                    "value": [{"id": "file-a", "name": _FILE_NAME, "file": {}}],
                     "@odata.nextLink": next_url,
                 }
             )
         if url.endswith("/children?p=2"):
             return Response({"value": [{"id": "sub-a", "name": "Sub", "folder": {}}]})
-        if method == "POST" and url.endswith("/children"):
+        if method == "POST" and url.endswith(_CHILDREN_PATH):
             return Response(
                 {
                     "id": "new-folder",
@@ -96,6 +101,10 @@ def main() -> None:
         raise AssertionError((method, url))
 
     manager._request = request
+    return manager, share_url, folder, calls
+
+
+def _check_folder_metadata(manager, share_url, calls):
     metadata = manager.get_folder_metadata_from_url(share_url)
     assert metadata.id == "folder-a"
     sharing_url = "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc"
@@ -104,13 +113,15 @@ def main() -> None:
     assert manager.get_folder_metadata_from_url(redirect_url).id == "folder-a"
     assert any("/drives/drive-a/root:/Folder%20%231" in url for _, url, _ in calls)
     files, folders = manager.list_folder_from_url(share_url)
-    assert set(files) == {"a.txt"} and set(folders) == {"Sub"}
+    assert set(files) == {_FILE_NAME} and set(folders) == {"Sub"}
     created = manager.create_folder_from_url(share_url, "New #1")
     assert created.name == "New #1"
     permissions = manager.get_folder_permissions_from_url(share_url)
     assert permissions[0]["granted_to"]["id"] == "user-a"
     assert permissions[0]["roles"] == ("read",)
 
+
+def _check_deletions(manager, share_url, folder):
     try:
         manager.create_folder_from_url(share_url, "bad/name")
     except SPValidationError:
@@ -120,8 +131,8 @@ def main() -> None:
 
     manager._request = lambda method, url, **kwargs: (
         Response(folder)
-        if "/shares/" in url or "/drives/drive-a/root:/" in url
-        else Response({"value": [{"id": "file-a", "name": "a.txt", "file": {}}]})
+        if _SHARES_PATH in url or _DRIVE_ROOT_PATH in url
+        else Response({"value": [{"id": "file-a", "name": _FILE_NAME, "file": {}}]})
     )
     try:
         manager.delete_folder_from_url(share_url)
@@ -133,9 +144,9 @@ def main() -> None:
     deleted = []
 
     def delete_request(method, url, **kwargs):
-        if "/shares/" in url or "/drives/drive-a/root:/" in url:
+        if _SHARES_PATH in url or _DRIVE_ROOT_PATH in url:
             return Response(folder)
-        if url.endswith("/children"):
+        if url.endswith(_CHILDREN_PATH):
             return Response({"value": []})
         deleted.append((method, url))
         return Response({})
@@ -147,9 +158,9 @@ def main() -> None:
     child_lists = []
 
     def force_delete_request(method, url, **kwargs):
-        if "/shares/" in url or "/drives/drive-a/root:/" in url:
+        if _SHARES_PATH in url or _DRIVE_ROOT_PATH in url:
             return Response(folder)
-        if url.endswith("/children"):
+        if url.endswith(_CHILDREN_PATH):
             child_lists.append(url)
             return Response({"value": [{"id": "should-not-be-read"}]})
         deleted.append((method, url))
@@ -159,6 +170,8 @@ def main() -> None:
     manager.delete_folder_from_url(share_url, force_delete=True)
     assert not child_lists
 
+
+def _check_boundaries(manager, share_url, folder):
     manager._request = lambda method, url, **kwargs: Response(
         {**folder, "parentReference": {"siteId": "site-b", "driveId": "drive-a"}}
     )
@@ -171,7 +184,7 @@ def main() -> None:
 
     file_obj = SPFile(
         id="file-a",
-        name="a.txt",
+        name=_FILE_NAME,
         parent_reference={"siteId": "site-a", "driveId": "drive-a"},
     )
     manager.get_file_metadata_from_url = lambda url: file_obj
@@ -188,7 +201,10 @@ def main() -> None:
     )
     file_permissions = manager.get_file_permissions_from_url(share_url)
     assert file_permissions[0]["granted_to"]["id"] == "user-a"
+    return file_obj
 
+
+def _check_transfer_adapters(manager, share_url, file_obj):
     transfer_calls = []
     manager.get_folder_metadata_from_url = lambda url: SPFolder(
         id="folder-a",
@@ -205,7 +221,7 @@ def main() -> None:
         ("download_folder", path, kwargs)
     )
     with tempfile.TemporaryDirectory() as directory:
-        local_file = Path(directory) / "a.txt"
+        local_file = Path(directory) / _FILE_NAME
         local_file.write_bytes(b"data")
         local_folder = Path(directory) / "tree"
         local_folder.mkdir()
@@ -219,6 +235,13 @@ def main() -> None:
     ]
     assert all(call[2]["_folder"].id == "folder-a" for call in transfer_calls)
 
+
+def main() -> None:
+    manager, share_url, manager_folder, calls = _configure_manager()
+    _check_folder_metadata(manager, share_url, calls)
+    _check_deletions(manager, share_url, manager_folder)
+    file_obj = _check_boundaries(manager, share_url, manager_folder)
+    _check_transfer_adapters(manager, share_url, file_obj)
     assert len(calls) >= 6
 
 

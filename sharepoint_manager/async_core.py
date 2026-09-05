@@ -16,7 +16,11 @@ from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
-from .core import _DIRECT_UPLOAD_MAX_BYTES, SharepointManagerBase
+from .core import (
+    _DIRECT_UPLOAD_MAX_BYTES,
+    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
+    SharepointManagerBase,
+)
 from .dataclasses import (
     ClientCredential,
     OperationPolicy,
@@ -53,7 +57,17 @@ _CHUNK_SIZE = 20 * 327680
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
 _RETRY_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT"})
+_GRAPH_CONFLICT_BEHAVIOR = "@microsoft.graph.conflictBehavior"
 logger = logging.getLogger(__name__)
+
+
+def _write_fd(fd: int, chunk: bytes) -> None:
+    view = memoryview(chunk)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("file descriptor write made no progress")
+        view = view[written:]
 
 
 class AsyncSharepointManager:
@@ -159,6 +173,7 @@ class AsyncSharepointManager:
                     "AsyncSharepointManager requires the httpx dependency"
                 ) from exc
             self._client = httpx.AsyncClient(follow_redirects=False)
+            await asyncio.sleep(0)
         return self._client
 
     def _validate_graph_url(self, url: str) -> None:
@@ -193,6 +208,33 @@ class AsyncSharepointManager:
         except Exception:  # noqa: BLE001
             return
 
+    async def _get_token_result(self) -> Any:
+        if self._token_provider is not None:
+            result = self._token_provider.get_token(
+                f"https://{self.graph_host}/.default"
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        return await self._acquire_msal_token()
+
+    def _cache_token(self, result: Any, now: int) -> str:
+        if not isinstance(result, dict):
+            expires_on = int(getattr(result, "expires_on", 0) or 0)
+            result = {
+                "access_token": getattr(result, "token", None),
+                "expires_on": expires_on,
+                "expires_in": max(expires_on - now, 60) if expires_on else 3600,
+            }
+        if "access_token" not in result:
+            raise SPAuthenticationError("Authentication failed")
+        self._cached_token = str(result["access_token"])
+        expires_on = int(result.get("expires_on", 0) or 0)
+        if not expires_on:
+            expires_on = now + max(int(result.get("expires_in", 3600) or 3600), 60)
+        self._cached_token_expiry = expires_on
+        return self._cached_token
+
     async def _ensure_token(self) -> str:
         now = int(time.time())
         if self._cached_token and self._cached_token_expiry - now > 120:
@@ -203,34 +245,12 @@ class AsyncSharepointManager:
             if self._cached_token and self._cached_token_expiry - now > 120:
                 return self._cached_token
 
-            if self._token_provider is not None:
-                result = self._token_provider.get_token(
-                    f"https://{self.graph_host}/.default"
-                )
-                if inspect.isawaitable(result):
-                    result = await result
-            else:
-                result = await self._acquire_msal_token()
-
-            if not isinstance(result, dict):
-                token = getattr(result, "token", None)
-                expires_on = int(getattr(result, "expires_on", 0) or 0)
-                result = {
-                    "access_token": token,
-                    "expires_on": expires_on,
-                    "expires_in": max(expires_on - now, 60) if expires_on else 3600,
-                }
-            if not isinstance(result, dict) or "access_token" not in result:
-                raise SPAuthenticationError("Authentication failed")
-            self._cached_token = str(result["access_token"])
-            expires_on = int(result.get("expires_on", 0) or 0)
-            if not expires_on:
-                expires_on = now + max(int(result.get("expires_in", 3600) or 3600), 60)
-            self._cached_token_expiry = expires_on
+            result = await self._get_token_result()
+            self._cache_token(result, now)
             self._emit("auth.token_refresh", success=True)
             return self._cached_token
 
-    async def _acquire_msal_token(self) -> dict[str, Any]:
+    def _ensure_msal_client(self) -> None:
         if self._msal_client is None:
             try:
                 from msal import ConfidentialClientApplication, PublicClientApplication
@@ -252,46 +272,55 @@ class AsyncSharepointManager:
             else:
                 raise SPAuthenticationError("Unsupported credentials")
 
+    async def _get_msal_account(self) -> Any:
+        if self._account is None:
+            accounts = await asyncio.to_thread(
+                self._msal_client.get_accounts, username=self._username
+            )
+            self._account = accounts[0] if accounts else None
+        return self._account
+
+    async def _acquire_password_token(self, scopes: list[str]) -> dict[str, Any]:
+        if not self._warned_password_auth:
+            warnings.warn(
+                "Username/password authentication is deprecated and does not support MFA or Conditional Access; the password is used only for initial token bootstrap.",
+                UserWarning,
+                stacklevel=3,
+            )
+            self._warned_password_auth = True
+        if self._password is None:
+            raise SPAuthenticationError(
+                "Silent authentication failed; credentials must be supplied again"
+            )
+        result = await asyncio.to_thread(
+            self._msal_client.acquire_token_by_username_password,
+            username=self._username,
+            password=self._password,
+            scopes=scopes,
+        )
+        if isinstance(result, dict) and "access_token" in result:
+            self._password = None
+            self.credentials = None
+            await self._get_msal_account()
+        return result
+
+    async def _acquire_user_token(self, scopes: list[str]) -> dict[str, Any]:
+        account = await self._get_msal_account()
+        if account is not None:
+            result = await asyncio.to_thread(
+                self._msal_client.acquire_token_silent,
+                scopes=scopes,
+                account=account,
+            )
+            if result and "access_token" in result:
+                return result
+        return await self._acquire_password_token(scopes)
+
+    async def _acquire_msal_token(self) -> dict[str, Any]:
+        self._ensure_msal_client()
         scopes = [f"https://{self.graph_host}/.default"]
         if self._user_credentials:
-            if self._account is None:
-                accounts = await asyncio.to_thread(
-                    self._msal_client.get_accounts, username=self._username
-                )
-                self._account = accounts[0] if accounts else None
-            if self._account is not None:
-                result = await asyncio.to_thread(
-                    self._msal_client.acquire_token_silent,
-                    scopes=scopes,
-                    account=self._account,
-                )
-                if result and "access_token" in result:
-                    return result
-            if not self._warned_password_auth:
-                warnings.warn(
-                    "Username/password authentication is deprecated and does not support MFA or Conditional Access; the password is used only for initial token bootstrap.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-                self._warned_password_auth = True
-            if self._password is None:
-                raise SPAuthenticationError(
-                    "Silent authentication failed; credentials must be supplied again"
-                )
-            result = await asyncio.to_thread(
-                self._msal_client.acquire_token_by_username_password,
-                username=self._username,
-                password=self._password,
-                scopes=scopes,
-            )
-            if isinstance(result, dict) and "access_token" in result:
-                self._password = None
-                self.credentials = None
-                accounts = await asyncio.to_thread(
-                    self._msal_client.get_accounts, username=self._username
-                )
-                self._account = accounts[0] if accounts else None
-            return result
+            return await self._acquire_user_token(scopes)
 
         return await asyncio.to_thread(
             self._msal_client.acquire_token_for_client, scopes=scopes
@@ -330,7 +359,7 @@ class AsyncSharepointManager:
                 if hasattr(response, "aclose"):
                     await response.aclose()
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded",
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
                     status=getattr(response, "status_code", None),
                     request_id=request_id,
                     retryable=True,
@@ -353,7 +382,7 @@ class AsyncSharepointManager:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded", retryable=True
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
                 )
             request_kwargs = dict(kwargs)
             request_kwargs["timeout"] = min(
@@ -365,7 +394,7 @@ class AsyncSharepointManager:
                 )
             except asyncio.TimeoutError as exc:
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded", retryable=True
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
                 ) from exc
             if time.monotonic() >= deadline:
                 request_id = response.headers.get("request-id") or response.headers.get(
@@ -373,7 +402,7 @@ class AsyncSharepointManager:
                 )
                 await self._close_response(response)
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded",
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
                     status=getattr(response, "status_code", None),
                     request_id=request_id,
                     retryable=True,
@@ -398,7 +427,7 @@ class AsyncSharepointManager:
             if delay >= remaining:
                 await self._close_response(response)
                 raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded",
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED,
                     status=response.status_code,
                     request_id=response.headers.get("request-id"),
                     retryable=True,
@@ -493,6 +522,18 @@ class AsyncSharepointManager:
     def _validate_boundary(self, item: dict[str, Any]) -> None:
         SharepointManagerBase._validate_item_boundary(self, item)
 
+    async def _request_item(
+        self, endpoint: str, *, not_found: type[SPNotFoundError]
+    ) -> dict[str, Any]:
+        response = await self._retry_request("GET", endpoint)
+        try:
+            self._raise_for_status(response, not_found=not_found)
+            item = response.json()
+        finally:
+            await self._close_response(response)
+        self._validate_boundary(item)
+        return item
+
     async def _get_item_from_url(
         self, url: str, *, not_found: type[SPNotFoundError] = SPNotFoundError
     ) -> dict[str, Any]:
@@ -507,25 +548,26 @@ class AsyncSharepointManager:
             endpoint = f"{self._graph_base_url}/drives/{self._drive_id}/root"
             if relative_path:
                 endpoint += f":/{quote(relative_path, safe='/')}"
-            response = await self._retry_request("GET", endpoint)
-            try:
-                self._raise_for_status(response, not_found=not_found)
-                item = response.json()
-            finally:
-                await self._close_response(response)
-            self._validate_boundary(item)
-            return item
-        response = await self._retry_request(
-            "GET",
+            return await self._request_item(endpoint, not_found=not_found)
+        return await self._request_item(
             f"https://{self.graph_host}/v1.0/shares/{self._share_id(url)}/driveItem",
+            not_found=not_found,
         )
-        try:
-            self._raise_for_status(response, not_found=not_found)
-            item = response.json()
-        finally:
-            await self._close_response(response)
-        self._validate_boundary(item)
-        return item
+
+    def _store_children(
+        self,
+        values: list[dict[str, Any]],
+        files: dict[str, SPFile],
+        folders: dict[str, SPFolder],
+    ) -> None:
+        for item in values:
+            self._validate_boundary(item)
+            if "file" in item:
+                file = SPFile.from_dict(item)
+                files[file.name] = file
+            elif "folder" in item:
+                child = SPFolder.from_dict(item)
+                folders[child.name] = child
 
     async def _children(
         self, folder: SPFolder, budget: dict[str, Any] | None = None
@@ -562,14 +604,7 @@ class AsyncSharepointManager:
             item_count += len(values)
             if item_count > self.policy.max_items:
                 raise SPValidationError("Graph item budget exceeded")
-            for item in values:
-                self._validate_boundary(item)
-                if "file" in item:
-                    file = SPFile.from_dict(item)
-                    files[file.name] = file
-                elif "folder" in item:
-                    child = SPFolder.from_dict(item)
-                    folders[child.name] = child
+            self._store_children(values, files, folders)
             next_url = data.get("@odata.nextLink")
             if next_url is not None and not isinstance(next_url, str):
                 raise SPValidationError("Invalid Graph pagination link")
@@ -623,18 +658,15 @@ class AsyncSharepointManager:
                             chunks: AsyncIterator[bytes] = response.aiter_bytes(
                                 _DOWNLOAD_CHUNK_SIZE
                             )
-                            with os.fdopen(fd, "wb") as output:
-                                fd = None
-                                async for chunk in chunks:
-                                    await self._consume_chunk(
-                                        output,
-                                        chunk,
-                                        digest,
-                                        budget,
-                                        downloaded,
-                                        int(item.size),
-                                    )
-                                    downloaded += len(chunk)
+                            async for chunk in chunks:
+                                self._check_chunk(
+                                    chunk, budget, downloaded, int(item.size)
+                                )
+                                _write_fd(fd, chunk)
+                                digest.update(chunk)
+                                downloaded += len(chunk)
+                            os.close(fd)
+                            fd = None
                     except (
                         OSError,
                         SPValidationError,
@@ -649,13 +681,13 @@ class AsyncSharepointManager:
                     "GET", item.download_url, authenticated=False
                 )
                 self._raise_for_status(response)
-                with os.fdopen(fd, "wb") as output:
-                    fd = None
-                    chunk = response.content
-                    await self._consume_chunk(
-                        output, chunk, digest, budget, downloaded, int(item.size)
-                    )
-                    downloaded = len(chunk)
+                chunk = response.content
+                self._check_chunk(chunk, budget, downloaded, int(item.size))
+                _write_fd(fd, chunk)
+                digest.update(chunk)
+                downloaded = len(chunk)
+                os.close(fd)
+                fd = None
             if downloaded != int(item.size):
                 raise SPValidationError("Downloaded content was incomplete")
             if item.quick_xor_hash and digest.b64digest() != item.quick_xor_hash:
@@ -671,11 +703,9 @@ class AsyncSharepointManager:
             except FileNotFoundError:
                 pass
 
-    async def _consume_chunk(
+    def _check_chunk(
         self,
-        output: Any,
         chunk: bytes,
-        digest: QuickXorHash,
         budget: dict[str, Any],
         downloaded: int = 0,
         declared_size: int | None = None,
@@ -690,8 +720,6 @@ class AsyncSharepointManager:
         if budget["bytes"] + len(chunk) > self.policy.max_total_bytes:
             raise SPValidationError("Transfer byte budget exceeded")
         self._consume_budget(budget, byte_count=len(chunk))
-        output.write(chunk)
-        digest.update(chunk)
 
     async def download_file_from_url(self, url: str, destination: str) -> SPFile:
         """Download one approved SharePoint file to an explicit path.
@@ -733,7 +761,7 @@ class AsyncSharepointManager:
             json={
                 "name": name,
                 "folder": {},
-                "@microsoft.graph.conflictBehavior": "fail",
+                _GRAPH_CONFLICT_BEHAVIOR: "fail",
             },
         )
         self._raise_for_status(response)
@@ -765,7 +793,7 @@ class AsyncSharepointManager:
                 "PUT",
                 url,
                 headers={"Content-Length": str(size)},
-                params={"@microsoft.graph.conflictBehavior": "replace"},
+                params={_GRAPH_CONFLICT_BEHAVIOR: "replace"},
                 content=path.read_bytes(),
             )
             try:
@@ -782,13 +810,13 @@ class AsyncSharepointManager:
             "POST",
             f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}:/{path.name}:/createUploadSession",
             headers={"Content-Type": "application/json"},
-            json={"item": {"@microsoft.graph.conflictBehavior": "replace"}},
+            json={"item": {_GRAPH_CONFLICT_BEHAVIOR: "replace"}},
         )
         self._raise_for_status(session_response)
         upload_url = session_response.json()["uploadUrl"]
         offset = 0
         response = None
-        with path.open("rb") as source:  # noqa: ASYNC230
+        with path.open("rb") as source:  # noqa: ASYNC230  # NOSONAR — no stdlib async file API
             while chunk := source.read(_CHUNK_SIZE):
                 end = offset + len(chunk) - 1
                 response = await self._retry_request(

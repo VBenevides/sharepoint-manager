@@ -47,7 +47,7 @@ def main() -> None:
         def __exit__(self, *args):
             return False
 
-        def iter_content(self, chunk_size):
+        def iter_content(self, **_kwargs):
             yield b"abc"
             yield b"de"
 

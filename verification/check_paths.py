@@ -38,6 +38,7 @@ def main() -> None:
     seen = []
     manager._request = lambda method, url, **kwargs: seen.append(url) or Response()
     manager._get_folder("Folder #1/100%/São")
+    assert seen
     assert "%23" in seen[0] and "%25" in seen[0] and "%C3%A3" in seen[0]
 
 

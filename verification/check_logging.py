@@ -41,7 +41,7 @@ def main() -> None:
     finally:
         logger.removeHandler(handler)
         logger.setLevel(original_level)
-        for installed in list(logger.handlers):
+        for installed in logger.handlers[:]:
             if installed not in original_handlers:
                 logger.removeHandler(installed)
 

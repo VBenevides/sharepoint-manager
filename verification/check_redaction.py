@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -60,10 +61,11 @@ def main() -> None:
         'logger.info("Download completed: %s',
     ):
         assert expression not in source
-    try:
-        safe_join("/tmp", "")
-    except ValueError as exc:
-        assert "secret-sentinel" not in str(exc)
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            safe_join(directory, "")
+        except ValueError as exc:
+            assert "secret-sentinel" not in str(exc)
 
 
 if __name__ == "__main__":

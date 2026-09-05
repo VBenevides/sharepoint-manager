@@ -10,7 +10,7 @@ def main() -> None:
         "attestations: write",
         "environment: release",
         "id-token: write",
-        'python -m pip install ".[dev]"',
+        "uv sync --locked --extra dev",
         'test "$version" = "$(tr -d',
         "twine check --strict",
         "cyclonedx-py",

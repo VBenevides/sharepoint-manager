@@ -56,7 +56,7 @@ class Client:
 
 
 class Provider:
-    def get_token(self, scope):
+    def get_token(self, _scope):
         return "benchmark-token"
 
 

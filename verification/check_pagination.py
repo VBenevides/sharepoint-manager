@@ -13,6 +13,8 @@ from sharepoint_manager.core import SharepointManager
 from sharepoint_manager.dataclasses import OperationPolicy
 from sharepoint_manager.exceptions import SPValidationError
 
+_GRAPH_NEXT_LINK = "@odata.nextLink"
+
 
 class Response:
     status_code = 200
@@ -46,13 +48,13 @@ def main() -> None:
     second = first + "?page=2"
     obj = manager(
         {
-            first: Response({"value": [{"id": "1"}], "@odata.nextLink": second}),
+            first: Response({"value": [{"id": "1"}], _GRAPH_NEXT_LINK: second}),
             second: Response({"value": [{"id": "2"}]}),
         }
     )
     assert [item["id"] for item in obj._paginate(first)] == ["1", "2"]
 
-    obj = manager({first: Response({"value": [], "@odata.nextLink": first})})
+    obj = manager({first: Response({"value": [], _GRAPH_NEXT_LINK: first})})
     try:
         list(obj._paginate(first))
     except SPValidationError:
@@ -61,7 +63,7 @@ def main() -> None:
         raise AssertionError("repeated pagination link accepted")
 
     obj = manager(
-        {first: Response({"value": [], "@odata.nextLink": "https://evil.example"})}
+        {first: Response({"value": [], _GRAPH_NEXT_LINK: "https://evil.example"})}
     )
     try:
         list(obj._paginate(first))

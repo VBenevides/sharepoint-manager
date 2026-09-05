@@ -27,7 +27,7 @@ class Response:
     def raise_for_status(self):
         return None
 
-    def iter_content(self, chunk_size):
+    def iter_content(self, **_kwargs):
         yield from self.chunks
         if self.fail:
             raise RuntimeError("stream interrupted")

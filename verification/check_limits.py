@@ -16,6 +16,9 @@ from sharepoint_manager.dataclasses import OperationPolicy, SPFile, SPFolder
 from sharepoint_manager.exceptions import SPValidationError
 from sharepoint_manager.utils import validate_archive_members
 
+_FIRST_FILE_NAME = "one.txt"
+_SECOND_FILE_NAME = "two.txt"
+
 
 def main() -> None:
     policy = OperationPolicy(max_file_bytes=10, max_total_bytes=20, max_disk_bytes=20)
@@ -51,7 +54,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as directory:
         source = Path(directory) / "tree"
         source.mkdir()
-        for name in ("one.txt", "two.txt"):
+        for name in (_FIRST_FILE_NAME, _SECOND_FILE_NAME):
             Path(source, name).write_bytes(b"123456")
 
         def upload(path, **kwargs):
@@ -67,8 +70,8 @@ def main() -> None:
 
         manager._list_children = lambda folder, _budget=None: (
             {
-                "one.txt": SPFile(id="one", name="one.txt", size=6),
-                "two.txt": SPFile(id="two", name="two.txt", size=6),
+                _FIRST_FILE_NAME: SPFile(id="one", name=_FIRST_FILE_NAME, size=6),
+                _SECOND_FILE_NAME: SPFile(id="two", name=_SECOND_FILE_NAME, size=6),
             },
             {},
         )

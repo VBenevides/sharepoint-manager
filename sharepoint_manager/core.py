@@ -87,6 +87,11 @@ _UPLOAD_CHUNK_SIZE = 20 * _GRAPH_CHUNK_UNIT
 _DIRECT_UPLOAD_MAX_BYTES = _UPLOAD_CHUNK_SIZE
 # Streaming download chunk size.
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+_GRAPH_REQUEST_DEADLINE_EXCEEDED = "Graph request deadline exceeded"
+_GRAPH_PAGE_EVENT = "graph.page"
+_GRAPH_ITEM_BUDGET_EXCEEDED = "Graph item budget exceeded"
+_GRAPH_NEXT_LINK = "@odata.nextLink"
+_INVALID_CONFLICT_BEHAVIOR = "Invalid conflict behavior"
 # GUID pattern used to extract a tenant id from authorization URIs.
 _GUID_RE = re.compile(r"/([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})")
 
@@ -210,6 +215,89 @@ class SharepointManagerBase:
 
         raise RuntimeError("Cannot determine tenant id from WWW-Authenticate header")
 
+    def _provider_token_result(self, now: int) -> dict[str, Any]:
+        result = self._token_provider.get_token(f"https://{self.graph_host}/.default")
+        token_value = getattr(result, "token", result)
+        expires_on = int(getattr(result, "expires_on", 0) or 0)
+        if isinstance(result, dict):
+            token_value = result.get("access_token", result.get("token"))
+            expires_on = int(result.get("expires_on", 0) or 0)
+        return {
+            "access_token": token_value,
+            "expires_on": expires_on,
+            "expires_in": max(expires_on - now, 60) if expires_on else 3600,
+        }
+
+    def _get_public_account(self) -> Any:
+        if getattr(self, "_account", None) is None:
+            accounts = self.ca.get_accounts(username=self._username)
+            self._account = accounts[0] if accounts else None
+        return self._account
+
+    def _acquire_public_password_token(self, scopes: list[str]) -> Any:
+        if not self._warned_password_auth:
+            warnings.warn(
+                "Username/password authentication is deprecated and not recommended; "
+                "ROPC does not support MFA or Conditional Access, and the password "
+                "is used only for initial token bootstrap.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._warned_password_auth = True
+        if self._password is None:
+            raise SPAuthenticationError(
+                "Silent authentication failed; credentials must be supplied again"
+            )
+        result = self.ca.acquire_token_by_username_password(
+            username=self._username,
+            password=self._password,
+            scopes=scopes,
+        )
+        if isinstance(result, dict) and "access_token" in result:
+            self._password = None
+            self.credentials = None
+            self._get_public_account()
+        return result
+
+    def _acquire_public_token(self) -> Any:
+        scopes = [f"https://{self.graph_host}/.default"]
+        account = self._get_public_account()
+        if account is not None:
+            result = self.ca.acquire_token_silent(scopes=scopes, account=account)
+            if isinstance(result, dict) and "access_token" in result:
+                self._password = None
+                self.credentials = None
+                return result
+        return self._acquire_public_password_token(scopes)
+
+    def _acquire_token(self, now: int) -> Any:
+        if self._token_provider is not None:
+            return self._provider_token_result(now)
+        if isinstance(self.ca, PublicClientApplication):
+            return self._acquire_public_token()
+        return self.ca.acquire_token_for_client(
+            scopes=[f"https://{self.graph_host}/.default"]
+        )
+
+    def _cache_acquired_token(self, result: Any, now: int) -> str:
+        if not isinstance(result, dict) or "access_token" not in result:
+            raise SPAuthenticationError("Authentication failed")
+
+        token = str(result["access_token"])
+        try:
+            expires_on = int(result.get("expires_on", 0))
+        except (TypeError, ValueError):
+            expires_on = 0
+        if not expires_on:
+            try:
+                expires_in = int(result.get("expires_in", 3600))
+            except (TypeError, ValueError):
+                expires_in = 3600
+            expires_on = now + max(expires_in, 60)
+        self._cached_token = token
+        self._cached_token_expiry = int(expires_on)
+        return token
+
     def _ensure_token(self) -> str:
         # Fast path – lock-free read of the cached token.
         now = int(time.time())
@@ -228,85 +316,8 @@ class SharepointManagerBase:
             if cached_token and (cached_expiry - now) > 120:
                 return str(cached_token)
 
-            # Acquire a new token. Injected providers cover managed identity,
-            # workload federation, certificates, and application-specific flows.
-            if self._token_provider is not None:
-                result = self._token_provider.get_token(
-                    f"https://{self.graph_host}/.default"
-                )
-                token_value = getattr(result, "token", result)
-                expires_on = int(getattr(result, "expires_on", 0) or 0)
-                if isinstance(result, dict):
-                    token_value = result.get("access_token", result.get("token"))
-                    expires_on = int(result.get("expires_on", 0) or 0)
-                result = {
-                    "access_token": token_value,
-                    "expires_on": expires_on,
-                    "expires_in": max(expires_on - now, 60) if expires_on else 3600,
-                }
-            elif isinstance(self.ca, PublicClientApplication):
-                scopes = [f"https://{self.graph_host}/.default"]
-                result = None
-                if getattr(self, "_account", None) is None:
-                    accounts = self.ca.get_accounts(username=self._username)
-                    self._account = accounts[0] if accounts else None
-                if self._account is not None:
-                    result = self.ca.acquire_token_silent(
-                        scopes=scopes, account=self._account
-                    )
-                    if isinstance(result, dict) and "access_token" in result:
-                        self._password = None
-                        self.credentials = None
-                    else:
-                        result = None
-                if not isinstance(result, dict) or "access_token" not in result:
-                    if not self._warned_password_auth:
-                        warnings.warn(
-                            "Username/password authentication is deprecated and not recommended; "
-                            "ROPC does not support MFA or Conditional Access, and the password "
-                            "is used only for initial token bootstrap.",
-                            UserWarning,
-                            stacklevel=2,
-                        )
-                        self._warned_password_auth = True
-                    if self._password is None:
-                        raise SPAuthenticationError(
-                            "Silent authentication failed; credentials must be supplied again"
-                        )
-                    result = self.ca.acquire_token_by_username_password(
-                        username=self._username,
-                        password=self._password,
-                        scopes=scopes,
-                    )
-                    if isinstance(result, dict) and "access_token" in result:
-                        self._password = None
-                        self.credentials = None
-                        accounts = self.ca.get_accounts(username=self._username)
-                        self._account = accounts[0] if accounts else None
-            else:
-                result = self.ca.acquire_token_for_client(
-                    scopes=[f"https://{self.graph_host}/.default"]
-                )
-
-            if not isinstance(result, dict) or "access_token" not in result:
-                raise SPAuthenticationError("Authentication failed")
-
-            token = str(result["access_token"])
-            # Prefer 'expires_on' (epoch seconds as str) else compute from 'expires_in'
-            try:
-                expires_on = int(result.get("expires_on", 0))
-            except (TypeError, ValueError):
-                expires_on = 0
-            if not expires_on:
-                try:
-                    expires_in = int(result.get("expires_in", 3600))
-                except (TypeError, ValueError):
-                    expires_in = 3600
-                expires_on = now + max(expires_in, 60)
-
-            # Cache the token and its expiry
-            self._cached_token = token
-            self._cached_token_expiry = int(expires_on)
+            result = self._acquire_token(now)
+            token = self._cache_acquired_token(result, now)
             self._emit_telemetry("auth.token_refresh", success=True)
 
             return token
@@ -377,6 +388,219 @@ class SharepointManagerBase:
                     if self._active_requests == 0:
                         condition.notify_all()
 
+    @staticmethod
+    def _request_timeout(
+        timeout: int | tuple[int, int] | None, remaining: float
+    ) -> int | float | tuple[float, ...] | None:
+        if timeout is None:
+            return remaining
+        if isinstance(timeout, tuple):
+            return tuple(min(float(value), remaining) for value in timeout)
+        if isinstance(timeout, (int, float)):
+            return min(float(timeout), remaining)
+        return timeout
+
+    def _retry_request_exception(
+        self,
+        exc: requests.RequestException,
+        *,
+        method: str,
+        attempt: int,
+        request_started: float,
+        retryable: bool,
+        max_attempts: int,
+        deadline: float,
+        policy: OperationPolicy,
+    ) -> bool:
+        self._emit_telemetry(
+            "graph.request",
+            method=method,
+            attempt=attempt,
+            elapsed_ms=round((time.monotonic() - request_started) * 1000, 1),
+            failure_class=type(exc).__name__,
+            retryable=retryable,
+        )
+        if not retryable or attempt >= max_attempts or time.monotonic() >= deadline:
+            return False
+        time.sleep(min(2**attempt, policy.max_retry_after_seconds))
+        return True
+
+    @staticmethod
+    def _retry_after_delay(
+        response: requests.Response,
+        attempt: int,
+        policy: OperationPolicy,
+        deadline: float,
+    ) -> float:
+        retry_after = response.headers.get("Retry-After")
+        delay: float | None = None
+        if retry_after is not None:
+            try:
+                delay = float(int(retry_after))
+            except (TypeError, ValueError):
+                try:
+                    target = parsedate_to_datetime(retry_after)
+                    delay = max(0.0, target.timestamp() - time.time())
+                except (TypeError, ValueError):
+                    delay = None
+        if delay is None:
+            delay = float(min(2**attempt, 60))
+        return min(
+            delay,
+            policy.max_retry_after_seconds,
+            max(0.0, deadline - time.monotonic()),
+        )
+
+    def _retry_response(
+        self,
+        response: requests.Response,
+        *,
+        method: str,
+        attempt: int,
+        max_attempts: int,
+        deadline: float,
+        policy: OperationPolicy,
+        request_id: str | None,
+    ) -> bool:
+        if (
+            response.status_code not in _RETRY_STATUSES
+            or method not in _RETRY_METHODS
+            or attempt >= max_attempts
+        ):
+            return False
+        delay = self._retry_after_delay(response, attempt, policy, deadline)
+        try:
+            response.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        if time.monotonic() >= deadline:
+            raise SPDeadlineExceeded(
+                _GRAPH_REQUEST_DEADLINE_EXCEEDED,
+                status=response.status_code,
+                request_id=request_id,
+                retryable=True,
+            )
+        time.sleep(delay)
+        return True
+
+    def _raise_request_failure(
+        self,
+        exc: requests.RequestException,
+        *,
+        authenticated: bool,
+        deadline: float,
+    ) -> None:
+        if time.monotonic() >= deadline:
+            if not authenticated:
+                raise SPDeadlineExceeded(
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
+                ) from None
+            raise SPDeadlineExceeded(
+                _GRAPH_REQUEST_DEADLINE_EXCEEDED,
+                retryable=True,
+                cause=exc,
+            ) from exc
+        if not authenticated:
+            raise SPGraphError("Capability request failed") from None
+        raise exc
+
+    @staticmethod
+    def _raise_response_deadline(response: requests.Response, deadline: float) -> None:
+        if time.monotonic() < deadline:
+            return
+        request_id = response.headers.get("request-id") or response.headers.get(
+            "client-request-id"
+        )
+        status = response.status_code
+        response.close()
+        raise SPDeadlineExceeded(
+            _GRAPH_REQUEST_DEADLINE_EXCEEDED,
+            status=status,
+            request_id=request_id,
+            retryable=True,
+        )
+
+    @staticmethod
+    def _reject_authenticated_redirect(
+        response: requests.Response, authenticated: bool
+    ) -> None:
+        if authenticated and 300 <= response.status_code < 400:
+            response.close()
+            raise SPValidationError("Authenticated Graph redirects are not allowed")
+
+    def _request_loop(
+        self,
+        *,
+        method: str,
+        timeout: int | tuple[int, int] | None,
+        authenticated: bool,
+        retryable: bool,
+        max_attempts: int,
+        deadline: float,
+        policy: OperationPolicy,
+        request_kwargs: dict[str, Any],
+    ) -> requests.Response:
+        attempt = 1
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SPDeadlineExceeded(
+                    _GRAPH_REQUEST_DEADLINE_EXCEEDED, retryable=True
+                )
+            request_started = time.monotonic()
+            request_kwargs["timeout"] = self._request_timeout(timeout, remaining)
+            try:
+                resp = self._perform_request(**request_kwargs)
+            except requests.RequestException as exc:
+                if self._retry_request_exception(
+                    exc,
+                    method=method,
+                    attempt=attempt,
+                    request_started=request_started,
+                    retryable=retryable,
+                    max_attempts=max_attempts,
+                    deadline=deadline,
+                    policy=policy,
+                ):
+                    attempt += 1
+                    continue
+                self._raise_request_failure(
+                    exc, authenticated=authenticated, deadline=deadline
+                )
+            self._raise_response_deadline(resp, deadline)
+            self._reject_authenticated_redirect(resp, authenticated)
+            request_id = resp.headers.get("request-id") or resp.headers.get(
+                "client-request-id"
+            )
+            if request_id:
+                logger.debug(
+                    "Graph request status=%s request_id=%s",
+                    resp.status_code,
+                    request_id,
+                )
+            self._emit_telemetry(
+                "graph.request",
+                method=method,
+                attempt=attempt,
+                status=resp.status_code,
+                request_id=request_id,
+                elapsed_ms=round((time.monotonic() - request_started) * 1000, 1),
+                throttled=resp.status_code == 429,
+                retrying=resp.status_code in _RETRY_STATUSES and attempt < max_attempts,
+            )
+            if self._retry_response(
+                resp,
+                method=method,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                deadline=deadline,
+                policy=policy,
+                request_id=request_id,
+            ):
+                attempt += 1
+                continue
+            return resp
+
     def _request(
         self,
         method: str,
@@ -410,138 +634,28 @@ class SharepointManagerBase:
             )
         method = method.upper()
         retryable = method in _RETRY_METHODS
-        attempt = 1
         policy = getattr(self, "policy", OperationPolicy())
         max_attempts = min(max_attempts, policy.max_retry_attempts) if retryable else 1
         deadline = time.monotonic() + policy.wall_clock_seconds
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded", retryable=True
-                )
-            request_started = time.monotonic()
-            request_timeout = remaining if timeout is None else timeout
-            if isinstance(request_timeout, tuple):
-                request_timeout = tuple(
-                    min(float(value), remaining) for value in request_timeout
-                )
-            elif isinstance(request_timeout, (int, float)):
-                request_timeout = min(float(request_timeout), remaining)
-            try:
-                resp = self._perform_request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    timeout=request_timeout,
-                    json=json,
-                    data=data,
-                    params=params,
-                    stream=stream,
-                    allow_redirects=allow_redirects,
-                )
-            except requests.RequestException as exc:
-                self._emit_telemetry(
-                    "graph.request",
-                    method=method,
-                    attempt=attempt,
-                    elapsed_ms=round((time.monotonic() - request_started) * 1000, 1),
-                    failure_class=type(exc).__name__,
-                    retryable=retryable,
-                )
-                if (
-                    not retryable
-                    or attempt >= max_attempts
-                    or time.monotonic() >= deadline
-                ):
-                    if time.monotonic() >= deadline:
-                        if not authenticated:
-                            raise SPDeadlineExceeded(
-                                "Graph request deadline exceeded", retryable=True
-                            ) from None
-                        raise SPDeadlineExceeded(
-                            "Graph request deadline exceeded",
-                            retryable=True,
-                            cause=exc,
-                        ) from exc
-                    if not authenticated:
-                        raise SPGraphError("Capability request failed") from None
-                    raise
-                time.sleep(min(2**attempt, policy.max_retry_after_seconds))
-                attempt += 1
-                continue
-            if time.monotonic() >= deadline:
-                request_id = resp.headers.get("request-id") or resp.headers.get(
-                    "client-request-id"
-                )
-                status = resp.status_code
-                resp.close()
-                raise SPDeadlineExceeded(
-                    "Graph request deadline exceeded",
-                    status=status,
-                    request_id=request_id,
-                    retryable=True,
-                )
-            if authenticated and 300 <= resp.status_code < 400:
-                resp.close()
-                raise SPValidationError("Authenticated Graph redirects are not allowed")
-            request_id = resp.headers.get("request-id") or resp.headers.get(
-                "client-request-id"
-            )
-            if request_id:
-                logger.debug(
-                    "Graph request status=%s request_id=%s",
-                    resp.status_code,
-                    request_id,
-                )
-            self._emit_telemetry(
-                "graph.request",
-                method=method,
-                attempt=attempt,
-                status=resp.status_code,
-                request_id=request_id,
-                elapsed_ms=round((time.monotonic() - request_started) * 1000, 1),
-                throttled=resp.status_code == 429,
-                retrying=resp.status_code in _RETRY_STATUSES and attempt < max_attempts,
-            )
-            # Handle throttling / transient 5xx with Retry-After.
-            if resp.status_code in _RETRY_STATUSES and attempt < max_attempts:
-                retry_after = resp.headers.get("Retry-After")
-                delay: float | None = None
-                if retry_after is not None:
-                    try:
-                        delay = float(int(retry_after))
-                    except (TypeError, ValueError):
-                        # Fall back to HTTP-date format.
-                        try:
-                            target = parsedate_to_datetime(retry_after)
-                            delay = max(0.0, target.timestamp() - time.time())
-                        except (TypeError, ValueError):
-                            delay = None
-                if delay is None:
-                    delay = float(min(2**attempt, 60))
-                delay = min(
-                    delay,
-                    policy.max_retry_after_seconds,
-                    max(0.0, deadline - time.monotonic()),
-                )
-                # Release any streamed body before sleeping to avoid leaking
-                # connections back to the pool in CLOSE_WAIT.
-                try:
-                    resp.close()
-                except Exception:  # noqa: BLE001, S110
-                    pass
-                if time.monotonic() >= deadline:
-                    raise SPDeadlineExceeded(
-                        "Graph request deadline exceeded",
-                        status=resp.status_code,
-                        request_id=request_id,
-                        retryable=True,
-                    )
-                time.sleep(delay)
-                attempt += 1
-                continue
-            return resp
+        return self._request_loop(
+            method=method,
+            timeout=timeout,
+            authenticated=authenticated,
+            retryable=retryable,
+            max_attempts=max_attempts,
+            deadline=deadline,
+            policy=policy,
+            request_kwargs={
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "json": json,
+                "data": data,
+                "params": params,
+                "stream": stream,
+                "allow_redirects": allow_redirects,
+            },
+        )
 
     def _raise_for_status(
         self,
@@ -590,7 +704,7 @@ class SharepointManagerBase:
     def _paginate(
         self, url: str, _budget: dict[str, Any] | None = None
     ) -> Iterator[dict[str, Any]]:
-        """Yield items across Graph pages following @odata.nextLink."""
+        """Yield items across Graph pages following Graph next links."""
         next_url: str | None = url
         seen: set[str] = set()
         page_count = 0
@@ -621,18 +735,28 @@ class SharepointManagerBase:
             page_count += 1
             page_items = len(data.get("value", []))
             self._emit_telemetry(
-                "graph.page",
+                _GRAPH_PAGE_EVENT,
                 operation="collection",
                 page=page_count,
                 items=page_items,
                 total_items=item_count + page_items,
             )
-            for item in data.get("value", []):
-                item_count += 1
-                if item_count > policy.max_items:
-                    raise SPValidationError("Graph item budget exceeded")
+            for item, current_count in self._bounded_page_items(
+                data.get("value", []), policy, item_count
+            ):
+                item_count = current_count
                 yield item
-            next_url = data.get("@odata.nextLink")
+            next_url = data.get(_GRAPH_NEXT_LINK)
+
+    @staticmethod
+    def _bounded_page_items(
+        values: Any, policy: OperationPolicy, item_count: int
+    ) -> Iterator[tuple[dict[str, Any], int]]:
+        for item in values:
+            item_count += 1
+            if item_count > policy.max_items:
+                raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
+            yield item, item_count
 
     def iter_collection(self, url: str) -> Iterator[SPCollectionPage]:
         """Yield bounded, caller-consumable Graph collection pages."""
@@ -664,17 +788,33 @@ class SharepointManagerBase:
             values = tuple(payload.get("value", []))
             item_count += len(values)
             if item_count > policy.max_items:
-                raise SPValidationError("Graph item budget exceeded")
+                raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
             page_count += 1
             self._emit_telemetry(
-                "graph.page",
+                _GRAPH_PAGE_EVENT,
                 operation="collection",
                 page=page_count,
                 items=len(values),
                 total_items=item_count,
             )
-            next_url = payload.get("@odata.nextLink")
+            next_url = payload.get(_GRAPH_NEXT_LINK)
             yield SPCollectionPage(values, next_url)
+
+    @staticmethod
+    def _classify_delta_items(
+        items: list[dict[str, Any]],
+    ) -> tuple[list[SPFile], list[SPFolder], list[SPDeletedItem]]:
+        files: list[SPFile] = []
+        folders: list[SPFolder] = []
+        deleted: list[SPDeletedItem] = []
+        for item in items:
+            if "deleted" in item:
+                deleted.append(SPDeletedItem.from_dict(item))
+            elif "file" in item:
+                files.append(SPFile.from_dict(item))
+            elif "folder" in item:
+                folders.append(SPFolder.from_dict(item))
+        return files, folders, deleted
 
     def iter_folder_delta(
         self, sp_relative_folder_path: str = "", delta_link: str | None = None
@@ -707,26 +847,19 @@ class SharepointManagerBase:
                 payload = response.json()
             finally:
                 response.close()
-            files = []
-            folders = []
-            deleted = []
-            for item in payload.get("value", []):
-                if "deleted" in item:
-                    deleted.append(SPDeletedItem.from_dict(item))
-                elif "file" in item:
-                    files.append(SPFile.from_dict(item))
-                elif "folder" in item:
-                    folders.append(SPFolder.from_dict(item))
+            files, folders, deleted = self._classify_delta_items(
+                payload.get("value", [])
+            )
             item_count += len(files) + len(folders) + len(deleted)
             if item_count > policy.max_items:
-                raise SPValidationError("Graph item budget exceeded")
-            next_page = payload.get("@odata.nextLink")
+                raise SPValidationError(_GRAPH_ITEM_BUDGET_EXCEEDED)
+            next_page = payload.get(_GRAPH_NEXT_LINK)
             checkpoint = payload.get("@odata.deltaLink")
             if checkpoint is not None:
                 self._validate_graph_url(checkpoint)
             page_count += 1
             self._emit_telemetry(
-                "graph.page",
+                _GRAPH_PAGE_EVENT,
                 operation="delta",
                 page=page_count,
                 items=len(files) + len(folders) + len(deleted),
@@ -1262,7 +1395,7 @@ class SharepointManager(SharepointManagerBase):
             Uploaded file metadata.
         """
         if conflict_behavior not in {"fail", "replace", "rename"}:
-            raise SPValidationError("Invalid conflict behavior")
+            raise SPValidationError(_INVALID_CONFLICT_BEHAVIOR)
         # 1. Resolve the sharing URL to get Drive and Parent IDs
         file_obj = self.get_file_metadata_from_url(sharing_url)
         drive_id = file_obj.parent_reference["driveId"]
@@ -1701,7 +1834,7 @@ class SharepointManager(SharepointManagerBase):
         if not filename or os.path.basename(filename) != filename:
             raise SPValidationError("filename must be a plain file name")
         if conflict_behavior not in {"fail", "replace", "rename"}:
-            raise SPValidationError("Invalid conflict behavior")
+            raise SPValidationError(_INVALID_CONFLICT_BEHAVIOR)
 
         try:
             source.seek(0, os.SEEK_END)
@@ -1957,6 +2090,71 @@ class SharepointManager(SharepointManagerBase):
         )
         return result
 
+    def _upload_resumable_chunks(
+        self,
+        source: BinaryIO,
+        upload_url: str,
+        file_size_b: int,
+        start_byte: int = 0,
+    ) -> tuple[requests.Response | None, int]:
+        response: requests.Response | None = None
+        while start_byte < file_size_b:
+            chunk = source.read(min(_UPLOAD_CHUNK_SIZE, file_size_b - start_byte))
+            if not chunk:
+                raise SPValidationError("Upload source ended before its declared size")
+            end_byte = start_byte + len(chunk) - 1
+            response = self._request(
+                "PUT",
+                upload_url,
+                headers={
+                    "Content-Length": str(len(chunk)),
+                    "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size_b}",
+                },
+                timeout=60,
+                data=chunk,
+            )
+            self._raise_for_status(response)
+            next_start = end_byte + 1
+            try:
+                ranges = response.json().get("nextExpectedRanges", [])
+                if ranges:
+                    next_start = int(str(ranges[0]).split("-", 1)[0])
+            except (AttributeError, TypeError, ValueError):
+                pass
+            if next_start < 0 or next_start > file_size_b:
+                raise SPValidationError("Graph returned an invalid upload offset")
+            if next_start != end_byte + 1:
+                source.seek(next_start)
+            start_byte = next_start
+        return response, start_byte
+
+    @staticmethod
+    def _resumable_result(
+        response: requests.Response | None,
+        fallback: SPFile | None,
+        target_folder: SPFolder | None,
+        file_name: str,
+        get_file: Callable[[str, SPFolder], SPFile],
+    ) -> SPFile:
+        if response is None:
+            raise SPAmbiguousWriteError()
+        try:
+            return SPFile.from_dict(response.json())
+        except (TypeError, KeyError, ValueError):
+            if fallback is not None:
+                return fallback
+            if target_folder is not None:
+                return get_file(file_name, target_folder)
+            raise SPAmbiguousWriteError()
+
+    def _cleanup_upload_session(self, upload_url: str | None) -> None:
+        if upload_url is None:
+            return
+        try:
+            self._request("DELETE", upload_url, timeout=30)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
     def _upload_source_resumable(
         self,
         source: BinaryIO,
@@ -1999,46 +2197,11 @@ class SharepointManager(SharepointManagerBase):
                 )
                 self._raise_for_status(response)
             else:
-                while start_byte < file_size_b:
-                    chunk = source.read(
-                        min(_UPLOAD_CHUNK_SIZE, file_size_b - start_byte)
-                    )
-                    if not chunk:
-                        raise SPValidationError(
-                            "Upload source ended before its declared size"
-                        )
-                    end_byte = start_byte + len(chunk) - 1
-                    response = self._request(
-                        "PUT",
-                        upload_url,
-                        headers={
-                            "Content-Length": str(len(chunk)),
-                            "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size_b}",
-                        },
-                        timeout=60,
-                        data=chunk,
-                    )
-                    self._raise_for_status(response)
-                    next_start = end_byte + 1
-                    try:
-                        ranges = response.json().get("nextExpectedRanges", [])
-                        if ranges:
-                            next_start = int(str(ranges[0]).split("-", 1)[0])
-                    except (AttributeError, TypeError, ValueError):
-                        pass
-                    if next_start < 0 or next_start > file_size_b:
-                        raise SPValidationError(
-                            "Graph returned an invalid upload offset"
-                        )
-                    if next_start != end_byte + 1:
-                        source.seek(next_start)
-                    start_byte = next_start
+                response, start_byte = self._upload_resumable_chunks(
+                    source, upload_url, file_size_b
+                )
         except Exception as exc:  # noqa: BLE001
-            if upload_url is not None:
-                try:
-                    self._request("DELETE", upload_url, timeout=30)
-                except Exception:  # noqa: BLE001, S110
-                    pass
+            self._cleanup_upload_session(upload_url)
             self._emit_telemetry(
                 "transfer",
                 operation="upload",
@@ -2050,17 +2213,13 @@ class SharepointManager(SharepointManagerBase):
                 failure_class=type(exc).__name__,
             )
             raise SPAmbiguousWriteError() from None
-        if response is None:
-            raise SPAmbiguousWriteError()
-        try:
-            result = SPFile.from_dict(response.json())
-        except (TypeError, KeyError, ValueError):
-            if fallback is not None:
-                result = fallback
-            elif target_folder is not None:
-                result = self._get_file(file_name, target_folder)
-            else:
-                raise SPAmbiguousWriteError()
+        result = self._resumable_result(
+            response,
+            fallback,
+            target_folder,
+            file_name,
+            self._get_file,
+        )
         self._emit_telemetry(
             "transfer",
             operation="upload",
@@ -2106,7 +2265,7 @@ class SharepointManager(SharepointManagerBase):
         """
 
         if conflict_behavior not in {"fail", "replace", "rename"}:
-            raise SPValidationError("Invalid conflict behavior")
+            raise SPValidationError(_INVALID_CONFLICT_BEHAVIOR)
         local_file_path = os.path.abspath(local_file_path)
         if os.path.islink(local_file_path):
             raise SPValidationError("Symlink upload roots are not allowed")
@@ -2145,6 +2304,20 @@ class SharepointManager(SharepointManagerBase):
                 file_size_b,
                 conflict_behavior,
             )
+
+    @staticmethod
+    def _scan_upload_folder(local_folder_path: str) -> tuple[list[str], list[str]]:
+        files: list[str] = []
+        subdirs: list[str] = []
+        with os.scandir(local_folder_path) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    raise SPValidationError("Symlinks are not allowed in upload trees")
+                if entry.is_file(follow_symlinks=False):
+                    files.append(entry.path)
+                elif entry.is_dir(follow_symlinks=False):
+                    subdirs.append(entry.path)
+        return files, subdirs
 
     def upload_folder(
         self,
@@ -2208,16 +2381,7 @@ class SharepointManager(SharepointManagerBase):
         sp_folder_path = f"{base_relative}/{new_folder_name}".lstrip("/")
         logger.info("Uploading folder")
 
-        with os.scandir(local_folder_path) as entries:
-            files: list[str] = []
-            subdirs: list[str] = []
-            for entry in entries:
-                if entry.is_symlink():
-                    raise SPValidationError("Symlinks are not allowed in upload trees")
-                if entry.is_file(follow_symlinks=False):
-                    files.append(entry.path)
-                elif entry.is_dir(follow_symlinks=False):
-                    subdirs.append(entry.path)
+        files, subdirs = self._scan_upload_folder(local_folder_path)
 
         target_folder = self._resolve_folder(sp_folder_path, create_folder=True)
         for file_path in files:
