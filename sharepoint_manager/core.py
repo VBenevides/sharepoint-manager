@@ -2307,6 +2307,20 @@ class SharepointManager(SharepointManagerBase):
                 conflict_behavior,
             )
 
+    @staticmethod
+    def _scan_upload_folder(local_folder_path: str) -> tuple[list[str], list[str]]:
+        files: list[str] = []
+        subdirs: list[str] = []
+        with os.scandir(local_folder_path) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    raise SPValidationError("Symlinks are not allowed in upload trees")
+                if entry.is_file(follow_symlinks=False):
+                    files.append(entry.path)
+                elif entry.is_dir(follow_symlinks=False):
+                    subdirs.append(entry.path)
+        return files, subdirs
+
     def upload_folder(
         self,
         local_folder_path: str,
@@ -2369,16 +2383,7 @@ class SharepointManager(SharepointManagerBase):
         sp_folder_path = f"{base_relative}/{new_folder_name}".lstrip("/")
         logger.info("Uploading folder")
 
-        with os.scandir(local_folder_path) as entries:
-            files: list[str] = []
-            subdirs: list[str] = []
-            for entry in entries:
-                if entry.is_symlink():
-                    raise SPValidationError("Symlinks are not allowed in upload trees")
-                if entry.is_file(follow_symlinks=False):
-                    files.append(entry.path)
-                elif entry.is_dir(follow_symlinks=False):
-                    subdirs.append(entry.path)
+        files, subdirs = self._scan_upload_folder(local_folder_path)
 
         target_folder = self._resolve_folder(sp_folder_path, create_folder=True)
         for file_path in files:
