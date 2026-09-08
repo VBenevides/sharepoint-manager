@@ -17,7 +17,7 @@ from sharepoint_manager.exceptions import (
     SPUnauthorizedTarget,
     SPValidationError,
 )
-from sharepoint_manager.urls import share_id
+from sharepoint_manager.urls import share_id, sharepoint_location_path
 
 _SHARES_PATH = "/shares/"
 _DRIVE_ROOT_PATH = "/drives/drive-a/root:/"
@@ -259,6 +259,11 @@ def _check_transfer_adapters(manager, share_url, file_obj):
 
 def main() -> None:
     manager, share_url, manager_folder, calls = _configure_manager()
+    assert sharepoint_location_path(
+        "https://tenant.sharepoint.com/sites/site/Shared%20Documents/a;b.txt",
+        manager.url,
+        manager._drive_url_name,
+    ) == "a;b.txt"
     _check_folder_metadata(manager, share_url, calls)
     _check_deletions(manager, share_url, manager_folder)
     file_obj = _check_boundaries(manager, share_url, manager_folder)

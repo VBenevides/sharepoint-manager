@@ -2,7 +2,7 @@
 
 import base64
 import re
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
 from .exceptions import SPUnauthorizedTarget, SPValidationError
 
@@ -92,8 +92,8 @@ def sharepoint_location_path(
     url: str, configured_site_url: str, drive_url_name: str
 ) -> str | None:
     """Return the drive-relative path from a browser SharePoint URL."""
-    parsed = urlparse(url)
-    configured = urlparse(configured_site_url)
+    parsed = urlsplit(url)
+    configured = urlsplit(configured_site_url)
     if parsed.netloc.lower() != configured.netloc.lower():
         return None
     path = unquote(parsed.path).rstrip("/") or "/"
