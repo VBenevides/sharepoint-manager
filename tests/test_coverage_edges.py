@@ -360,6 +360,29 @@ class CoverageEdges(unittest.TestCase):
                                 timeout=30,
                             )
 
+    def test_constructor_nested_teams_folder_uses_first_site_route(self):
+        with (
+            patch.object(
+                SharepointManager, "_request", return_value=Response(payload={"id": "site"})
+            ) as request,
+            patch.object(SharepointManager, "_get_drive_id", return_value="drive"),
+            patch.object(
+                SharepointManager, "_get_folder", return_value=SPFolder(id="root")
+            ),
+            SharepointManager(
+                "https://tenant.sharepoint.com/sites/A/Documents/teams/B/file.txt",
+                token_provider=types.SimpleNamespace(get_token=lambda _scope: "token"),
+                tenant_id="tenant-id",
+            ) as manager,
+        ):
+            self.assertEqual(manager.url, "https://tenant.sharepoint.com/sites/A")
+            request.assert_called_once_with(
+                "GET",
+                "https://graph.microsoft.com/v1.0/sites/tenant.sharepoint.com:/sites/A",
+                headers={"Authorization": "Bearer token"},
+                timeout=30,
+            )
+
     def test_public_lifecycle_and_budget_edges(self):
         with (
             patch.object(SharepointManager, "_get_site_id", return_value="site"),
