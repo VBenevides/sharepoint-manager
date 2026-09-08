@@ -8,9 +8,11 @@ not need both capabilities.
 ## Caller boundary
 
 This package serves trusted automation. It authenticates the configured
-deployment identity and enforces its site/drive boundary; it does not know who
-called a method and must not be exposed directly as a multi-user authorization
-endpoint.
+deployment identity and enforces the tenant boundary for URL methods; pass
+`strict=True` when URL methods must stay within the configured site. Path and
+object workflows retain the configured site/drive boundary. The package does
+not know who called a method and must not be exposed directly as a multi-user
+authorization endpoint.
 
 For an end-user product, place an authenticated service or proxy in front of
 the package. That boundary must fail closed, evaluate direct, Entra-group, and

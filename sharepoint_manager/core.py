@@ -162,6 +162,32 @@ class SharepointManagerBase:
     def _validate_sharepoint_url(url: str) -> Any:
         return validate_sharepoint_url(url)
 
+    def _validate_url_tenant(self, url: str, configured_url: str, strict: bool) -> None:
+        parsed = validate_sharepoint_url(url)
+        if type(strict) is not bool:
+            raise TypeError("strict must be a bool")
+        if parsed.hostname != urlparse(configured_url).hostname:
+            raise SPUnauthorizedTarget(
+                "URL is outside the configured SharePoint tenant"
+            )
+
+    def _validate_url_item(self, item: dict[str, Any], strict: bool) -> None:
+        parent = item.get("parentReference")
+        if (
+            not isinstance(parent, dict)
+            or not isinstance(parent.get("driveId"), str)
+            or not parent["driveId"]
+        ):
+            raise SPUnauthorizedTarget("Resolved item has no trusted drive reference")
+        configured_site_id = str(self._site_id)
+        configured_site_ids = {configured_site_id}
+        if "," in configured_site_id:
+            configured_site_ids.update(configured_site_id.split(",")[1:])
+        if strict and parent.get("siteId") not in configured_site_ids:
+            raise SPUnauthorizedTarget(
+                "Resolved item is outside the configured SharePoint site"
+            )
+
     def _validate_item_boundary(self, item: dict[str, Any]) -> None:
         parent = item.get("parentReference")
         if not isinstance(parent, dict):
@@ -1114,17 +1140,24 @@ class SharepointManager(SharepointManagerBase):
         return item
 
     def _get_drive_item_from_url(
-        self, url: str, *, not_found: type[SPNotFoundError] = SPNotFoundError
+        self,
+        url: str,
+        *,
+        not_found: type[SPNotFoundError] = SPNotFoundError,
+        strict: bool = False,
     ) -> dict[str, Any]:
-        self._validate_sharepoint_url(url)
+        self._validate_url_tenant(url, self.url, strict)
         drive_url_name = getattr(self, "_drive_url_name", None) or getattr(
             self, "document_folder_name", ""
         )
-        relative_path = sharepoint_location_path(
-            url,
-            self.url,
-            drive_url_name,
-        )
+        try:
+            relative_path = sharepoint_location_path(
+                url,
+                self.url,
+                drive_url_name,
+            )
+        except SPUnauthorizedTarget:
+            relative_path = None
         if relative_path is not None:
             return self._get_drive_item_from_path(relative_path, not_found=not_found)
         encoded_url = share_id(url)
@@ -1140,16 +1173,18 @@ class SharepointManager(SharepointManagerBase):
             item = response.json()
         finally:
             response.close()
-        self._validate_item_boundary(item)
+        self._validate_url_item(item, strict)
         return item
 
-    def get_file_metadata_from_url(self, url: str) -> SPFile:
+    def get_file_metadata_from_url(self, url: str, *, strict: bool = False) -> SPFile:
         """
         Retrieve file metadata from a SharePoint file URL.
 
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         url : str
             The SharePoint file URL.
 
@@ -1165,16 +1200,22 @@ class SharepointManager(SharepointManagerBase):
         >>> file_metadata = manager.get_file_metadata_from_url(url = "https://tenant.sharepoint.com/...")
         """
 
-        data = self._get_drive_item_from_url(url, not_found=SPFileNotFound)
+        data = self._get_drive_item_from_url(
+            url, not_found=SPFileNotFound, strict=strict
+        )
         if "file" not in data:
             raise SPFileNotFound("SP file not found")
         return SPFile.from_dict(data)
 
-    def get_folder_metadata_from_url(self, url: str) -> SPFolder:
+    def get_folder_metadata_from_url(
+        self, url: str, *, strict: bool = False
+    ) -> SPFolder:
         """Resolve an approved SharePoint folder URL.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         url : str
             Approved SharePoint folder URL.
 
@@ -1183,18 +1224,22 @@ class SharepointManager(SharepointManagerBase):
         SPFolder
             Normalized folder metadata.
         """
-        data = self._get_drive_item_from_url(url, not_found=SPFolderNotFound)
+        data = self._get_drive_item_from_url(
+            url, not_found=SPFolderNotFound, strict=strict
+        )
         if "folder" not in data and "root" not in data:
             raise SPFolderNotFound("SP folder not found")
         return SPFolder.from_dict(data)
 
     def list_folder_from_url(
-        self, url: str
+        self, url: str, *, strict: bool = False
     ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
         """List files and folders below an approved folder URL.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         url : str
             Approved SharePoint folder URL.
 
@@ -1203,13 +1248,19 @@ class SharepointManager(SharepointManagerBase):
         tuple[dict[str, SPFile], dict[str, SPFolder]]
             Files and folders keyed by display name.
         """
-        return self._list_children(self.get_folder_metadata_from_url(url))
+        return self._list_children(
+            self.get_folder_metadata_from_url(url, strict=strict), _url_strict=strict
+        )
 
-    def create_folder_from_url(self, url: str, name: str) -> SPFolder:
+    def create_folder_from_url(
+        self, url: str, name: str, *, strict: bool = False
+    ) -> SPFolder:
         """Create one child folder below an approved folder URL.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         url : str
             Approved SharePoint parent-folder URL.
         name : str
@@ -1226,10 +1277,13 @@ class SharepointManager(SharepointManagerBase):
             or any(c in name for c in "/\\\0")
         ):
             raise SPValidationError("Folder name must be one safe path segment")
-        parent = self.get_folder_metadata_from_url(url)
+        parent = self.get_folder_metadata_from_url(url, strict=strict)
+        return self._create_url_folder(parent, name, strict)
+
+    def _create_url_folder(self, parent: SPFolder, name: str, strict: bool) -> SPFolder:
         response = self._request(
             "POST",
-            f"{self._graph_base_url}/drives/{self._drive_id}/items/{parent.id}/children",
+            f"{self._graph_base_url}/drives/{parent.parent_reference['driveId']}/items/{parent.id}/children",
             headers=self._hdr(json_content=True),
             timeout=30,
             json={"name": name, "folder": {}},
@@ -1239,30 +1293,40 @@ class SharepointManager(SharepointManagerBase):
             data = response.json()
         finally:
             response.close()
-        self._validate_item_boundary(data)
+        self._validate_url_item(data, strict)
         if "folder" not in data:
             raise SPGraphError("Graph returned a non-folder item")
         return SPFolder.from_dict(data)
 
-    def delete_folder_from_url(self, url: str, force_delete: bool = False) -> None:
+    def delete_folder_from_url(
+        self, url: str, force_delete: bool = False, *, strict: bool = False
+    ) -> None:
         """Delete an approved SharePoint folder.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         url : str
             Approved SharePoint folder URL.
         force_delete : bool, default=False
             Delete non-empty folders when true.
         """
-        self.delete_folder(
-            self.get_folder_metadata_from_url(url), force_delete=force_delete
+        self._delete_folder_scoped(
+            self.get_folder_metadata_from_url(url, strict=strict),
+            force_delete=force_delete,
+            _url_strict=strict,
         )
 
-    def get_folder_permissions_from_url(self, url: str) -> tuple[dict[str, Any], ...]:
+    def get_folder_permissions_from_url(
+        self, url: str, *, strict: bool = False
+    ) -> tuple[dict[str, Any], ...]:
         """Return normalized permissions for an approved folder URL.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         url : str
             Approved SharePoint folder URL.
 
@@ -1271,17 +1335,21 @@ class SharepointManager(SharepointManagerBase):
         tuple[dict[str, Any], ...]
             Normalized permission records.
         """
-        folder = self.get_folder_metadata_from_url(url)
-        permission_url = f"{self._graph_base_url}/drives/{self._drive_id}/items/{folder.id}/permissions"
+        folder = self.get_folder_metadata_from_url(url, strict=strict)
+        permission_url = f"{self._graph_base_url}/drives/{folder.parent_reference['driveId']}/items/{folder.id}/permissions"
         return tuple(
             self._normalize_permission(item) for item in self._paginate(permission_url)
         )
 
-    def get_file_permissions_from_url(self, url: str) -> tuple[dict[str, Any], ...]:
+    def get_file_permissions_from_url(
+        self, url: str, *, strict: bool = False
+    ) -> tuple[dict[str, Any], ...]:
         """Return normalized permissions for an approved file URL.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         url : str
             Approved SharePoint file URL.
 
@@ -1290,8 +1358,8 @@ class SharepointManager(SharepointManagerBase):
         tuple[dict[str, Any], ...]
             Normalized permission records.
         """
-        file = self.get_file_metadata_from_url(url)
-        permission_url = f"{self._graph_base_url}/drives/{self._drive_id}/items/{file.id}/permissions"
+        file = self.get_file_metadata_from_url(url, strict=strict)
+        permission_url = f"{self._graph_base_url}/drives/{file.parent_reference['driveId']}/items/{file.id}/permissions"
         return tuple(
             self._normalize_permission(item) for item in self._paginate(permission_url)
         )
@@ -1330,6 +1398,8 @@ class SharepointManager(SharepointManagerBase):
         url: str,
         local_download_path: str,
         new_filename: str | None = None,
+        *,
+        strict: bool = False,
     ) -> SPFile:
         """
         Download a file from SharePoint file URL.
@@ -1337,6 +1407,8 @@ class SharepointManager(SharepointManagerBase):
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         url : str
             The SharePoint file URL.
         local_download_path : str
@@ -1356,7 +1428,7 @@ class SharepointManager(SharepointManagerBase):
         >>> manager.download_file(url = "https://tenant.sharepoint.com/...", local_download_path = "./Download_Dir")
         """
 
-        file_obj = self.get_file_metadata_from_url(url)
+        file_obj = self.get_file_metadata_from_url(url, strict=strict)
 
         local_download_path = os.path.abspath(local_download_path)
 
@@ -1377,6 +1449,8 @@ class SharepointManager(SharepointManagerBase):
         sharing_url: str,
         local_file_path: str,
         conflict_behavior: Literal["fail", "replace", "rename"] = "replace",
+        *,
+        strict: bool = False,
     ) -> SPFile:
         """
         Uploads a file to SharePoint using an Upload Session.
@@ -1384,6 +1458,8 @@ class SharepointManager(SharepointManagerBase):
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         sharing_url : str
             Approved SharePoint sharing URL for the target file.
         local_file_path : str
@@ -1399,7 +1475,7 @@ class SharepointManager(SharepointManagerBase):
         if conflict_behavior not in {"fail", "replace", "rename"}:
             raise SPValidationError(_INVALID_CONFLICT_BEHAVIOR)
         # 1. Resolve the sharing URL to get Drive and Parent IDs
-        file_obj = self.get_file_metadata_from_url(sharing_url)
+        file_obj = self.get_file_metadata_from_url(sharing_url, strict=strict)
         drive_id = file_obj.parent_reference["driveId"]
         item_id = file_obj.id
 
@@ -1427,11 +1503,15 @@ class SharepointManager(SharepointManagerBase):
         folder_url: str,
         local_file_path: str,
         conflict_behavior: Literal["fail", "replace", "rename"] = "replace",
+        *,
+        strict: bool = False,
     ) -> SPFile:
         """Upload a local file below an approved SharePoint folder URL.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         folder_url : str
             Approved SharePoint folder URL.
         local_file_path : str
@@ -1444,42 +1524,51 @@ class SharepointManager(SharepointManagerBase):
         SPFile
             Uploaded file metadata.
         """
-        folder = self.get_folder_metadata_from_url(folder_url)
-        return self.upload_file(
+        folder = self.get_folder_metadata_from_url(folder_url, strict=strict)
+        return self._upload_file_scoped(
             local_file_path,
             _folder=folder,
+            _url_strict=strict,
             conflict_behavior=conflict_behavior,
         )
 
     def upload_folder_to_folder_url(
-        self, folder_url: str, local_folder_path: str
+        self, folder_url: str, local_folder_path: str, *, strict: bool = False
     ) -> None:
         """Recursively upload a local folder below an approved folder URL.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         folder_url : str
             Approved SharePoint destination folder URL.
         local_folder_path : str
             Local source folder path.
         """
-        folder = self.get_folder_metadata_from_url(folder_url)
-        self.upload_folder(local_folder_path, _folder=folder)
+        folder = self.get_folder_metadata_from_url(folder_url, strict=strict)
+        self._upload_folder_scoped(
+            local_folder_path, _folder=folder, _url_strict=strict
+        )
 
     def download_folder_from_url(
-        self, folder_url: str, local_download_path: str
+        self, folder_url: str, local_download_path: str, *, strict: bool = False
     ) -> None:
         """Recursively download an approved SharePoint folder URL.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         folder_url : str
             Approved SharePoint folder URL.
         local_download_path : str
             Local destination directory.
         """
-        folder = self.get_folder_metadata_from_url(folder_url)
-        self.download_folder(local_download_path, _folder=folder)
+        folder = self.get_folder_metadata_from_url(folder_url, strict=strict)
+        self._download_folder_scoped(
+            local_download_path, _folder=folder, _url_strict=strict
+        )
 
     # ----------------------------------------------------------
     # Support Methods
@@ -1941,6 +2030,8 @@ class SharepointManager(SharepointManagerBase):
         self,
         folder: SPFolder | None = None,
         _budget: dict[str, Any] | None = None,
+        *,
+        _url_strict: bool | None = None,
     ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
         """Single-pass enumeration of a folder's children.
 
@@ -1948,11 +2039,17 @@ class SharepointManager(SharepointManagerBase):
         trip versus calling :meth:`list_files` and :meth:`list_folders`.
         """
         target = folder if folder is not None else self._root_folder
-        drive_id = self._drive_id
+        drive_id = (
+            self._drive_id
+            if _url_strict is None
+            else target.parent_reference["driveId"]
+        )
         url = f"{self._graph_base_url}/drives/{drive_id}/items/{target.id}/children"
         files: dict[str, SPFile] = {}
         folders: dict[str, SPFolder] = {}
         for item in self._paginate(url, _budget=_budget):
+            if _url_strict is not None:
+                self._validate_url_item(item, _url_strict)
             if "file" in item:
                 f = SPFile.from_dict(item)
                 files[f.name] = f
@@ -2035,14 +2132,25 @@ class SharepointManager(SharepointManagerBase):
         target_folder: SPFolder,
         file_size_b: int,
         conflict_behavior: Literal["fail", "replace", "rename"],
+        *,
+        _url_strict: bool | None = None,
     ) -> SPFile:
         with open(local_file_path, "rb") as source:
+            if _url_strict is None:
+                return self._upload_source_direct(
+                    source,
+                    get_filename(local_file_path),
+                    target_folder,
+                    file_size_b,
+                    conflict_behavior,
+                )
             return self._upload_source_direct(
                 source,
                 get_filename(local_file_path),
                 target_folder,
                 file_size_b,
                 conflict_behavior,
+                _url_strict=_url_strict,
             )
 
     def _upload_source_direct(
@@ -2052,12 +2160,16 @@ class SharepointManager(SharepointManagerBase):
         target_folder: SPFolder,
         file_size_b: int,
         conflict_behavior: Literal["fail", "replace", "rename"],
+        *,
+        _url_strict: bool | None = None,
     ) -> SPFile:
         encoded_name = quote_segment(file_name)
-        url = (
+        drive_endpoint = (
             f"{self._graph_base_url}/sites/{self._site_id}/drives/{self._drive_id}"
-            f"/items/{target_folder.id}:/{encoded_name}:/content"
+            if _url_strict is None
+            else f"{self._graph_base_url}/drives/{target_folder.parent_reference['driveId']}"
         )
+        url = f"{drive_endpoint}/items/{target_folder.id}:/{encoded_name}:/content"
         try:
             response = self._request(
                 "PUT",
@@ -2165,6 +2277,7 @@ class SharepointManager(SharepointManagerBase):
         file_size_b: int,
         conflict_behavior: Literal["fail", "replace", "rename"],
         *,
+        _url_strict: bool | None = None,
         session_url: str | None = None,
         fallback: SPFile | None = None,
     ) -> SPFile:
@@ -2172,8 +2285,13 @@ class SharepointManager(SharepointManagerBase):
             if target_folder is None:
                 raise SPValidationError("Upload target folder is required")
             encoded_name = quote_segment(file_name)
-            session_url = (
+            drive_endpoint = (
                 f"{self._graph_base_url}/sites/{self._site_id}/drives/{self._drive_id}"
+                if _url_strict is None
+                else f"{self._graph_base_url}/drives/{target_folder.parent_reference['driveId']}"
+            )
+            session_url = (
+                f"{drive_endpoint}"
                 f"/items/{target_folder.id}:/{encoded_name}:/createUploadSession"
             )
         response: requests.Response | None = None
@@ -2265,7 +2383,24 @@ class SharepointManager(SharepointManagerBase):
         >>> manager = SharepointManager(...)
         >>> manager.upload_file(local_file_path = "file.txt", sp_relative_folder_path = "Folder1/Folder2/Folder3")
         """
+        return self._upload_file_scoped(
+            local_file_path,
+            sp_relative_folder_path,
+            _folder,
+            conflict_behavior,
+            _budget,
+        )
 
+    def _upload_file_scoped(
+        self,
+        local_file_path: str,
+        sp_relative_folder_path: str | None = None,
+        _folder: SPFolder | None = None,
+        conflict_behavior: Literal["fail", "replace", "rename"] = "replace",
+        _budget: dict[str, Any] | None = None,
+        *,
+        _url_strict: bool | None = None,
+    ) -> SPFile:
         if conflict_behavior not in {"fail", "replace", "rename"}:
             raise SPValidationError(_INVALID_CONFLICT_BEHAVIOR)
         local_file_path = os.path.abspath(local_file_path)
@@ -2290,21 +2425,38 @@ class SharepointManager(SharepointManagerBase):
         file_size_mb = file_size_b / (1024 * 1024)
 
         if file_size_b <= _DIRECT_UPLOAD_MAX_BYTES:
+            if _url_strict is None:
+                return self._upload_file_direct(
+                    local_file_path,
+                    target_folder,
+                    file_size_b,
+                    conflict_behavior,
+                )
             return self._upload_file_direct(
                 local_file_path,
                 target_folder,
                 file_size_b,
                 conflict_behavior,
+                _url_strict=_url_strict,
             )
 
         logger.info("Uploading file (%.1f MB)", file_size_mb)
         with open(local_file_path, "rb") as file:
+            if _url_strict is None:
+                return self._upload_source_resumable(
+                    file,
+                    file_name,
+                    target_folder,
+                    file_size_b,
+                    conflict_behavior,
+                )
             return self._upload_source_resumable(
                 file,
                 file_name,
                 target_folder,
                 file_size_b,
                 conflict_behavior,
+                _url_strict=_url_strict,
             )
 
     @staticmethod
@@ -2353,7 +2505,20 @@ class SharepointManager(SharepointManagerBase):
         >>> manager = SharepointManager(...)
         >>> manager.upload_folder(local_folder_path="./Folder4", sp_relative_folder_path="Folder1/Folder2/Folder3")
         """
+        return self._upload_folder_scoped(
+            local_folder_path, sp_relative_folder_path, _folder, _depth, _budget
+        )
 
+    def _upload_folder_scoped(
+        self,
+        local_folder_path: str,
+        sp_relative_folder_path: str | None = None,
+        _folder: SPFolder | None = None,
+        _depth: int = 0,
+        _budget: dict[str, Any] | None = None,
+        *,
+        _url_strict: bool | None = None,
+    ) -> None:
         local_folder_path = os.path.abspath(local_folder_path)
         budget = _budget or {
             "bytes": 0,
@@ -2385,17 +2550,42 @@ class SharepointManager(SharepointManagerBase):
 
         files, subdirs = self._scan_upload_folder(local_folder_path)
 
-        target_folder = self._resolve_folder(sp_folder_path, create_folder=True)
+        if _url_strict is None:
+            target_folder = self._resolve_folder(sp_folder_path, create_folder=True)
+        else:
+            _, folders = self._list_children(base_folder, _url_strict=_url_strict)
+            target_folder = folders.get(new_folder_name)
+            if target_folder is None:
+                target_folder = self._create_url_folder(
+                    base_folder, new_folder_name, _url_strict
+                )
         for file_path in files:
-            self.upload_file(file_path, _folder=target_folder, _budget=budget)
+            if _url_strict is None:
+                self.upload_file(file_path, _folder=target_folder, _budget=budget)
+            else:
+                self._upload_file_scoped(
+                    file_path,
+                    _folder=target_folder,
+                    _budget=budget,
+                    _url_strict=_url_strict,
+                )
 
         for subdir_path in subdirs:
-            self.upload_folder(
-                subdir_path,
-                _folder=target_folder,
-                _depth=depth + 1,
-                _budget=budget,
-            )
+            if _url_strict is None:
+                self.upload_folder(
+                    subdir_path,
+                    _folder=target_folder,
+                    _depth=depth + 1,
+                    _budget=budget,
+                )
+            else:
+                self._upload_folder_scoped(
+                    subdir_path,
+                    _folder=target_folder,
+                    _depth=depth + 1,
+                    _budget=budget,
+                    _url_strict=_url_strict,
+                )
 
     # ----------------------------------------------------------
     # Download files/folders from Sharepoint
@@ -2437,7 +2627,26 @@ class SharepointManager(SharepointManagerBase):
         >>> manager.download_file(file="file.txt", local_download_path="./Download_Dir",
         ...     sp_relative_folder_path = "Folder1/Folder2/Folder3")
         """
+        return self._download_file_scoped(
+            file,
+            local_download_path,
+            sp_relative_folder_path,
+            new_filename,
+            _folder,
+            _budget,
+        )
 
+    def _download_file_scoped(
+        self,
+        file: str | SPFile,
+        local_download_path: str,
+        sp_relative_folder_path: str | None = None,
+        new_filename: str | None = None,
+        _folder: SPFolder | None = None,
+        _budget: dict[str, Any] | None = None,
+        *,
+        _url_strict: bool | None = None,
+    ) -> SPFile:
         local_download_path = os.path.abspath(local_download_path)
         self._check_depth(sp_relative_folder_path)
 
@@ -2450,7 +2659,12 @@ class SharepointManager(SharepointManagerBase):
             file_obj = self._get_file(file, target_folder)
         else:
             file_obj = file
-            self._validate_file_boundary(file_obj)
+            if _url_strict is None:
+                self._validate_file_boundary(file_obj)
+            else:
+                self._validate_url_item(
+                    {"parentReference": file_obj.parent_reference}, _url_strict
+                )
 
         os.makedirs(local_download_path, exist_ok=True)
         file_size_bytes = int(file_obj.size)
@@ -2493,7 +2707,20 @@ class SharepointManager(SharepointManagerBase):
         >>> manager.download_folder(local_download_path = "./Download_Dir",
         ...     sp_relative_folder_path = "Folder1/Folder2/Folder3")
         """
+        return self._download_folder_scoped(
+            local_download_path, sp_relative_folder_path, _folder, _depth, _budget
+        )
 
+    def _download_folder_scoped(
+        self,
+        local_download_path: str,
+        sp_relative_folder_path: str | None = None,
+        _folder: SPFolder | None = None,
+        _depth: int = 0,
+        _budget: dict[str, Any] | None = None,
+        *,
+        _url_strict: bool | None = None,
+    ) -> None:
         local_download_path = os.path.abspath(local_download_path)
         budget = _budget or {
             "bytes": 0,
@@ -2519,19 +2746,41 @@ class SharepointManager(SharepointManagerBase):
         os.makedirs(cur_folder_download_path, exist_ok=True)
 
         # Single-pass enumeration to halve Graph round-trips per folder.
-        files, subfolders = self._list_children(cur_folder, _budget=budget)
+        if _url_strict is None:
+            files, subfolders = self._list_children(cur_folder, _budget=budget)
+        else:
+            files, subfolders = self._list_children(
+                cur_folder, _budget=budget, _url_strict=_url_strict
+            )
 
         for file in files.values():
-            _ = self.download_file(file, cur_folder_download_path, _budget=budget)
+            if _url_strict is None:
+                _ = self.download_file(file, cur_folder_download_path, _budget=budget)
+            else:
+                _ = self._download_file_scoped(
+                    file,
+                    cur_folder_download_path,
+                    _budget=budget,
+                    _url_strict=_url_strict,
+                )
 
         # Recurse using the resolved subfolder paths.
         for subfolder in subfolders.values():
-            self.download_folder(
-                cur_folder_download_path,
-                _folder=subfolder,
-                _depth=depth + 1,
-                _budget=budget,
-            )
+            if _url_strict is None:
+                self.download_folder(
+                    cur_folder_download_path,
+                    _folder=subfolder,
+                    _depth=depth + 1,
+                    _budget=budget,
+                )
+            else:
+                self._download_folder_scoped(
+                    cur_folder_download_path,
+                    _folder=subfolder,
+                    _depth=depth + 1,
+                    _budget=budget,
+                    _url_strict=_url_strict,
+                )
 
     def delete_file(
         self, file: str | SPFile, sp_relative_folder_path: str | None = None
@@ -2628,7 +2877,16 @@ class SharepointManager(SharepointManagerBase):
         ...     logging.info("Sharepoint folder is not empty")
         >>> manager.delete_folder("Folder1/Folder2/Folder3", force_delete=True)
         """
+        return self._delete_folder_scoped(folder, force_delete, sp_relative_folder_path)
 
+    def _delete_folder_scoped(
+        self,
+        folder: str | SPFolder,
+        force_delete: bool = False,
+        sp_relative_folder_path: str | None = None,
+        *,
+        _url_strict: bool | None = None,
+    ) -> None:
         # Resolve the target folder without mutating manager state.
         if isinstance(folder, str):
             scope_path = (
@@ -2639,14 +2897,26 @@ class SharepointManager(SharepointManagerBase):
             target = self._resolve_folder(scope_path)
         else:
             target = folder
-            self._validate_object_boundary(target)
+            if _url_strict is None:
+                self._validate_object_boundary(target)
+            else:
+                self._validate_url_item(
+                    {"parentReference": target.parent_reference}, _url_strict
+                )
 
         if not force_delete:
-            files, folders = self._list_children(target)
+            if _url_strict is None:
+                files, folders = self._list_children(target)
+            else:
+                files, folders = self._list_children(target, _url_strict=_url_strict)
             if files or folders:
                 raise SPFolderNotEmpty("Sharepoint folder not empty")
 
-        drive_id = self._drive_id
+        drive_id = (
+            self._drive_id
+            if _url_strict is None
+            else target.parent_reference["driveId"]
+        )
         folder_id = target.id
         r = self._request(
             "DELETE",
