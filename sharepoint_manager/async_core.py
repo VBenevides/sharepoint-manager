@@ -814,7 +814,7 @@ class AsyncSharepointManager:
             )
         session_response = await self._retry_request(
             "POST",
-            f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}:/{path.name}:/createUploadSession",
+            f"{self._graph_base_url}/drives/{drive_id}/items/{folder.id}:/{quote(path.name, safe='')}:/createUploadSession",
             headers={"Content-Type": "application/json"},
             json={"item": {_GRAPH_CONFLICT_BEHAVIOR: "replace"}},
         )
