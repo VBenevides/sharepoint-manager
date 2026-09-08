@@ -328,6 +328,36 @@ class CoverageEdges(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_async_boundary_browser_url_uses_site_root(self):
+        async def exercise():
+            manager = AsyncSharepointManager(
+                "https://tenant.sharepoint.com/:f:/r/teams/COPILOTOIA-DECA/"
+                "Shared%20Documents/Folder?d=example",
+                token_provider=types.SimpleNamespace(get_token=lambda _scope: "token"),
+            )
+            urls = []
+            responses = iter(
+                [Response(payload={"id": "site"}), Response(payload={"id": "drive"})]
+            )
+
+            async def retry(method, url):
+                urls.append(url)
+                return next(responses)
+
+            with patch.object(manager, "_retry_request", retry):
+                await manager._ensure_boundary()
+            self.assertTrue(
+                urls[0].endswith(
+                    "/sites/tenant.sharepoint.com:/teams/COPILOTOIA-DECA"
+                )
+            )
+            self.assertEqual(
+                manager.sharepoint_site_url,
+                "https://tenant.sharepoint.com/teams/COPILOTOIA-DECA",
+            )
+
+        asyncio.run(exercise())
+
     def test_constructor_browser_url_uses_site_root(self):
         with (
             patch.object(

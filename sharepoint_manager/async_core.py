@@ -120,7 +120,7 @@ class AsyncSharepointManager:
         telemetry : callable, optional
             Best-effort event callback.
         """
-        SharepointManagerBase._validate_sharepoint_url(sharepoint_site_url)
+        parsed = SharepointManagerBase._validate_sharepoint_url(sharepoint_site_url)
         graph_host = graph_host.lower().rstrip(".")
         if graph_host not in GRAPH_HOSTS:
             raise SPValidationError(
@@ -135,7 +135,13 @@ class AsyncSharepointManager:
         if credentials is not None and token_provider is None and tenant_id is None:
             raise ValueError("tenant_id is required when credentials are used")
 
-        self.sharepoint_site_url = sharepoint_site_url
+        site_start = min(
+            parsed.path.index(route)
+            for route in ("/sites/", "/teams/")
+            if route in parsed.path
+        )
+        site_path = "/".join(parsed.path[site_start:].split("/")[:3])
+        self.sharepoint_site_url = f"https://{parsed.netloc}{site_path}"
         self.graph_host = graph_host
         self.tenant_id = tenant_id
         self._graph_base_url = f"https://{graph_host}/v1.0"
@@ -492,7 +498,7 @@ class AsyncSharepointManager:
             if self._site_id and self._drive_id:
                 return
             parsed = urlsplit(self.sharepoint_site_url)
-            site_path = quote(parsed.path.rstrip("/"), safe="/")
+            site_path = quote(parsed.path.rstrip("/"), safe="/%")
             response = await self._retry_request(
                 "GET",
                 f"{self._graph_base_url}/sites/{parsed.hostname}:{site_path}",
