@@ -32,6 +32,7 @@ from .exceptions import (
     SPThrottledError,
     SPValidationError,
 )
+from .pool import SharepointManagerPool, get_sharepoint_manager
 from .utils import QuickXorHash
 
 _logger = logging.getLogger(__name__)
@@ -75,6 +76,8 @@ __all__ = [
     "SPThrottledError",
     "SPValidationError",
     "SharepointManager",
+    "SharepointManagerPool",
     "TokenProvider",
     "UserDelegatedCredential",
+    "get_sharepoint_manager",
 ]
