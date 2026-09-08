@@ -358,6 +358,29 @@ class CoverageEdges(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_async_boundary_encodes_site_path_once(self):
+        async def exercise():
+            manager = AsyncSharepointManager(
+                "https://tenant.sharepoint.com/sites/Sales%20Ops/"
+                "Shared%20Documents/Folder",
+                token_provider=types.SimpleNamespace(get_token=lambda _scope: "token"),
+            )
+            urls = []
+            responses = iter(
+                [Response(payload={"id": "site"}), Response(payload={"id": "drive"})]
+            )
+
+            async def retry(method, url):
+                urls.append(url)
+                return next(responses)
+
+            with patch.object(manager, "_retry_request", retry):
+                await manager._ensure_boundary()
+            self.assertIn("/sites/tenant.sharepoint.com:/sites/Sales%20Ops", urls[0])
+            self.assertNotIn("Sales%2520Ops", urls[0])
+
+        asyncio.run(exercise())
+
     def test_async_boundary_responses_close(self):
         async def exercise():
             for stage, failure, error in (
