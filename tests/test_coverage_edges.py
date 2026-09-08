@@ -328,6 +328,38 @@ class CoverageEdges(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_constructor_browser_url_uses_site_root(self):
+        with (
+            patch.object(
+                SharepointManager, "_request", return_value=Response(payload={"id": "site"})
+            ) as request,
+            patch.object(SharepointManager, "_get_drive_id", return_value="drive"),
+            patch.object(
+                SharepointManager, "_get_folder", return_value=SPFolder(id="root")
+            ),
+        ):
+            for prefix in ("", "/:f:/r"):
+                for separator in ("sites", "teams"):
+                    root = f"https://tke.sharepoint.com/{separator}/COPILOTOIA-DECA"
+                    with self.subTest(prefix=prefix, separator=separator):
+                        with SharepointManager(
+                            f"https://tke.sharepoint.com{prefix}/{separator}/"
+                            "COPILOTOIA-DECA/Shared%20Documents/ARQUIVOS/"
+                            "PROJETO%20IA/Qualidade?d=example",
+                            token_provider=types.SimpleNamespace(
+                                get_token=lambda _scope: "token"
+                            ),
+                            tenant_id="tenant-id",
+                        ) as manager:
+                            self.assertEqual(manager.url, root)
+                            request.assert_called_with(
+                                "GET",
+                                "https://graph.microsoft.com/v1.0/sites/"
+                                f"tke.sharepoint.com:/{separator}/COPILOTOIA-DECA",
+                                headers={"Authorization": "Bearer token"},
+                                timeout=30,
+                            )
+
     def test_public_lifecycle_and_budget_edges(self):
         with (
             patch.object(SharepointManager, "_get_site_id", return_value="site"),
