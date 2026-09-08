@@ -17,6 +17,7 @@ from sharepoint_manager.exceptions import (
     SPUnauthorizedTarget,
     SPValidationError,
 )
+from sharepoint_manager.urls import share_id, sharepoint_location_path
 
 _SHARES_PATH = "/shares/"
 _DRIVE_ROOT_PATH = "/drives/drive-a/root:/"
@@ -107,11 +108,26 @@ def _configure_manager():
 def _check_folder_metadata(manager, share_url, calls):
     metadata = manager.get_folder_metadata_from_url(share_url)
     assert metadata.id == "folder-a"
-    sharing_url = "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc"
-    assert manager.get_folder_metadata_from_url(sharing_url).id == "folder-a"
+    for sharing_url in (
+        "https://tenant.sharepoint.com/:f:/s/demo/Eabc",
+        "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc",
+    ):
+        assert manager.get_folder_metadata_from_url(sharing_url).id == "folder-a"
+        assert calls[-1][:2] == (
+            "GET",
+            f"{manager._graph_base_url}/shares/{share_id(sharing_url)}/driveItem",
+        )
     redirect_url = "https://tenant.sharepoint.com/:f:/r/sites/site/Shared%20Documents/Folder%20%231"
     assert manager.get_folder_metadata_from_url(redirect_url).id == "folder-a"
     assert any("/drives/drive-a/root:/Folder%20%231" in url for _, url, _ in calls)
+    browser_url = (
+        "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Forms/AllItems.aspx"
+        "?id=%2Fsites%2Fsite%2FShared%20Documents%2FFolder%20%231"
+    )
+    assert manager.get_folder_metadata_from_url(browser_url).id == "folder-a"
+    assert calls[-1][1] == (
+        manager._graph_base_url + "/drives/drive-a/root:/Folder%20%231"
+    )
     files, folders = manager.list_folder_from_url(share_url)
     assert set(files) == {_FILE_NAME} and set(folders) == {"Sub"}
     created = manager.create_folder_from_url(share_url, "New #1")
@@ -175,12 +191,17 @@ def _check_boundaries(manager, share_url, folder):
     manager._request = lambda method, url, **kwargs: Response(
         {**folder, "parentReference": {"siteId": "site-b", "driveId": "drive-a"}}
     )
-    try:
-        manager.get_folder_metadata_from_url(share_url)
-    except SPUnauthorizedTarget:
-        pass
-    else:
-        raise AssertionError("off-boundary folder accepted")
+    for url in (
+        share_url,
+        "https://tenant.sharepoint.com/:f:/s/demo/Eabc",
+        "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc",
+    ):
+        try:
+            manager.get_folder_metadata_from_url(url)
+        except SPUnauthorizedTarget:
+            pass
+        else:
+            raise AssertionError("off-boundary folder accepted")
 
     file_obj = SPFile(
         id="file-a",
@@ -238,6 +259,21 @@ def _check_transfer_adapters(manager, share_url, file_obj):
 
 def main() -> None:
     manager, share_url, manager_folder, calls = _configure_manager()
+    drive_url = f"{manager.url}/Docs%2520Archive"
+    drive_name = manager._drive_name_from_web_url({"webUrl": drive_url}, "")
+    assert drive_name == "Docs%20Archive"
+    assert (
+        sharepoint_location_path(f"{drive_url}/Folder", manager.url, drive_name)
+        == "Folder"
+    )
+    assert (
+        sharepoint_location_path(
+            "https://tenant.sharepoint.com/sites/site/Shared%20Documents/a;b.txt",
+            manager.url,
+            manager._drive_url_name,
+        )
+        == "a;b.txt"
+    )
     _check_folder_metadata(manager, share_url, calls)
     _check_deletions(manager, share_url, manager_folder)
     file_obj = _check_boundaries(manager, share_url, manager_folder)

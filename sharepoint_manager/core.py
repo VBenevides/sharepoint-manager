@@ -998,10 +998,11 @@ class SharepointManager(SharepointManagerBase):
         self._account = None
         self._warned_password_auth = False
 
-        self.url: str = sharepoint_site_url
-        if "/teams/" in parsed_site_url.path:
+        teams_index = parsed_site_url.path.find("/teams/")
+        sites_index = parsed_site_url.path.find("/sites/")
+        if teams_index >= 0 and (sites_index < 0 or teams_index < sites_index):
             self.site_separator: Literal["/teams/", "/sites/"] = "/teams/"
-        elif "/sites/" in parsed_site_url.path:
+        elif sites_index >= 0:
             self.site_separator = "/sites/"
         else:
             raise ValueError(
@@ -1014,7 +1015,8 @@ class SharepointManager(SharepointManagerBase):
         # These variables shouldn't be changed manually
         self.site_name: str = parsed_site_url.path.split(
             self.site_separator, maxsplit=1
-        )[-1]
+        )[-1].split("/", maxsplit=1)[0]
+        self.url: str = f"{self.tenant_url}{self.site_separator}{self.site_name}"
 
         if token_provider is not None:
             self.ca = None

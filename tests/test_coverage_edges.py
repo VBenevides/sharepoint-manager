@@ -328,6 +328,171 @@ class CoverageEdges(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_async_boundary_browser_url_uses_site_root(self):
+        async def exercise():
+            manager = AsyncSharepointManager(
+                "https://tenant.sharepoint.com/:f:/r/teams/COPILOTOIA-DECA/"
+                "Shared%20Documents/Folder?d=example",
+                token_provider=types.SimpleNamespace(get_token=lambda _scope: "token"),
+            )
+            urls = []
+            responses = iter(
+                [Response(payload={"id": "site"}), Response(payload={"id": "drive"})]
+            )
+
+            async def retry(method, url):
+                urls.append(url)
+                return next(responses)
+
+            with patch.object(manager, "_retry_request", retry):
+                await manager._ensure_boundary()
+            self.assertTrue(
+                urls[0].endswith("/sites/tenant.sharepoint.com:/teams/COPILOTOIA-DECA")
+            )
+            self.assertEqual(
+                manager.sharepoint_site_url,
+                "https://tenant.sharepoint.com/teams/COPILOTOIA-DECA",
+            )
+
+        asyncio.run(exercise())
+
+    def test_async_boundary_encodes_site_path_once(self):
+        async def exercise():
+            manager = AsyncSharepointManager(
+                "https://tenant.sharepoint.com/sites/Sales%20Ops/"
+                "Shared%20Documents/Folder",
+                token_provider=types.SimpleNamespace(get_token=lambda _scope: "token"),
+            )
+            urls = []
+            responses = iter(
+                [Response(payload={"id": "site"}), Response(payload={"id": "drive"})]
+            )
+
+            async def retry(method, url):
+                urls.append(url)
+                return next(responses)
+
+            with patch.object(manager, "_retry_request", retry):
+                await manager._ensure_boundary()
+            self.assertIn("/sites/tenant.sharepoint.com:/sites/Sales%20Ops", urls[0])
+            self.assertNotIn("Sales%2520Ops", urls[0])
+
+        asyncio.run(exercise())
+
+    def test_async_boundary_responses_close(self):
+        async def exercise():
+            for stage, failure, error in (
+                (None, None, None),
+                (0, "status", SPAuthorizationError),
+                (0, "json", ValueError),
+                (0, "id", SPUnauthorizedTarget),
+                (1, "status", SPAuthorizationError),
+                (1, "json", ValueError),
+                (1, "id", SPUnauthorizedTarget),
+            ):
+                with self.subTest(stage=stage, failure=failure):
+                    manager = AsyncSharepointManager(
+                        "https://tenant.sharepoint.com/sites/demo",
+                        token_provider=types.SimpleNamespace(
+                            get_token=lambda _scope: "token"
+                        ),
+                    )
+                    responses = [
+                        Response(payload={"id": "site"}),
+                        Response(payload={"id": "drive"}),
+                    ]
+                    if stage is not None:
+                        responses[stage].status_code = (
+                            403 if failure == "status" else 200
+                        )
+                        responses[stage]._payload = {}
+                    pending = iter(responses)
+
+                    async def retry(method, url, pending=pending):
+                        return next(pending)
+
+                    with (
+                        patch.object(manager, "_retry_request", retry),
+                        patch.object(
+                            responses[stage or 0],
+                            "json",
+                            return_value=responses[stage or 0]._payload,
+                            side_effect=ValueError("invalid JSON")
+                            if failure == "json"
+                            else None,
+                        ),
+                    ):
+                        if error is None:
+                            await manager._ensure_boundary()
+                        else:
+                            with self.assertRaises(error):
+                                await manager._ensure_boundary()
+                    self.assertTrue(responses[0].closed)
+                    self.assertEqual(responses[1].closed, stage != 0)
+
+        asyncio.run(exercise())
+
+    def test_constructor_browser_url_uses_site_root(self):
+        with (
+            patch.object(
+                SharepointManager,
+                "_request",
+                return_value=Response(payload={"id": "site"}),
+            ) as request,
+            patch.object(SharepointManager, "_get_drive_id", return_value="drive"),
+            patch.object(
+                SharepointManager, "_get_folder", return_value=SPFolder(id="root")
+            ),
+        ):
+            for prefix in ("", "/:f:/r"):
+                for separator in ("sites", "teams"):
+                    root = f"https://tke.sharepoint.com/{separator}/COPILOTOIA-DECA"
+                    with (
+                        self.subTest(prefix=prefix, separator=separator),
+                        SharepointManager(
+                            f"https://tke.sharepoint.com{prefix}/{separator}/"
+                            "COPILOTOIA-DECA/Shared%20Documents/ARQUIVOS/"
+                            "PROJETO%20IA/Qualidade?d=example",
+                            token_provider=types.SimpleNamespace(
+                                get_token=lambda _scope: "token"
+                            ),
+                            tenant_id="tenant-id",
+                        ) as manager,
+                    ):
+                        self.assertEqual(manager.url, root)
+                        request.assert_called_with(
+                            "GET",
+                            "https://graph.microsoft.com/v1.0/sites/"
+                            f"tke.sharepoint.com:/{separator}/COPILOTOIA-DECA",
+                            headers={"Authorization": "Bearer token"},
+                            timeout=30,
+                        )
+
+    def test_constructor_nested_teams_folder_uses_first_site_route(self):
+        with (
+            patch.object(
+                SharepointManager,
+                "_request",
+                return_value=Response(payload={"id": "site"}),
+            ) as request,
+            patch.object(SharepointManager, "_get_drive_id", return_value="drive"),
+            patch.object(
+                SharepointManager, "_get_folder", return_value=SPFolder(id="root")
+            ),
+            SharepointManager(
+                "https://tenant.sharepoint.com/sites/A/Documents/teams/B/file.txt",
+                token_provider=types.SimpleNamespace(get_token=lambda _scope: "token"),
+                tenant_id="tenant-id",
+            ) as manager,
+        ):
+            self.assertEqual(manager.url, "https://tenant.sharepoint.com/sites/A")
+            request.assert_called_once_with(
+                "GET",
+                "https://graph.microsoft.com/v1.0/sites/tenant.sharepoint.com:/sites/A",
+                headers={"Authorization": "Bearer token"},
+                timeout=30,
+            )
+
     def test_public_lifecycle_and_budget_edges(self):
         with (
             patch.object(SharepointManager, "_get_site_id", return_value="site"),

@@ -387,11 +387,15 @@ async def _check_direct_uploads(
     await manager.upload_file_to_folder_url(folder_url, str(threshold))
     assert len(_upload_requests(client)) == 1
 
-    large = Path(directory) / "large.bin"
+    large = Path(directory) / "large #?.bin"
     large.write_bytes(b"x" * (_DIRECT_UPLOAD_MAX_BYTES + 1))
     client.requests.clear()
     await manager.upload_file_to_folder_url(folder_url, str(large))
     assert len(_upload_requests(client)) == 3
+    method, session_url = _upload_requests(client)[0]
+    assert method == "POST"
+    assert session_url.endswith("/large%20%23%3F.bin:/createUploadSession")
+    assert large.name not in session_url
 
 
 async def _check_workload(folder_url: str, folder_payload: dict) -> None:

@@ -2,7 +2,7 @@
 
 import base64
 import re
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
 from .exceptions import SPUnauthorizedTarget, SPValidationError
 
@@ -74,7 +74,11 @@ def validate_sharepoint_url(url: str):
         or parsed.fragment
         or parsed.port not in (None, 443)
         or not any(host.endswith(suffix) for suffix in SHAREPOINT_SUFFIXES)
-        or not ("/sites/" in parsed.path or "/teams/" in parsed.path)
+        or not (
+            "/sites/" in parsed.path
+            or "/teams/" in parsed.path
+            or re.fullmatch(r"/:[^/]+:/s/[^/]+/[^/]+", parsed.path)
+        )
     ):
         raise SPValidationError("SharePoint URLs must use an approved HTTPS site host")
     return parsed
@@ -88,8 +92,8 @@ def sharepoint_location_path(
     url: str, configured_site_url: str, drive_url_name: str
 ) -> str | None:
     """Return the drive-relative path from a browser SharePoint URL."""
-    parsed = urlparse(url)
-    configured = urlparse(configured_site_url)
+    parsed = urlsplit(url)
+    configured = urlsplit(configured_site_url)
     if parsed.netloc.lower() != configured.netloc.lower():
         return None
     path = unquote(parsed.path).rstrip("/") or "/"
@@ -97,11 +101,15 @@ def sharepoint_location_path(
     redirect = _LOCATION_REDIRECT_RE.match(path)
     if redirect:
         path = redirect.group("path").rstrip("/") or "/"
+    if path.endswith("/Forms/AllItems.aspx"):
+        target = parse_qs(parsed.query).get("id", [""])[0]
+        if target:
+            path = target.rstrip("/") or "/"
     if path != site_path and not path.startswith(f"{site_path}/"):
         return None
 
     relative = path[len(site_path) :].strip("/")
-    drive_name = unquote(drive_url_name).strip("/")
+    drive_name = drive_url_name.strip("/")
     if relative == drive_name:
         return ""
     prefix = f"{drive_name}/"
