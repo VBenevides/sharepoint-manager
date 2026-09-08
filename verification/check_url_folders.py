@@ -262,14 +262,18 @@ def main() -> None:
     drive_url = f"{manager.url}/Docs%2520Archive"
     drive_name = manager._drive_name_from_web_url({"webUrl": drive_url}, "")
     assert drive_name == "Docs%20Archive"
-    assert sharepoint_location_path(
-        f"{drive_url}/Folder", manager.url, drive_name
-    ) == "Folder"
-    assert sharepoint_location_path(
-        "https://tenant.sharepoint.com/sites/site/Shared%20Documents/a;b.txt",
-        manager.url,
-        manager._drive_url_name,
-    ) == "a;b.txt"
+    assert (
+        sharepoint_location_path(f"{drive_url}/Folder", manager.url, drive_name)
+        == "Folder"
+    )
+    assert (
+        sharepoint_location_path(
+            "https://tenant.sharepoint.com/sites/site/Shared%20Documents/a;b.txt",
+            manager.url,
+            manager._drive_url_name,
+        )
+        == "a;b.txt"
+    )
     _check_folder_metadata(manager, share_url, calls)
     _check_deletions(manager, share_url, manager_folder)
     file_obj = _check_boundaries(manager, share_url, manager_folder)

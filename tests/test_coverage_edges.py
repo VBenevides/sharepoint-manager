@@ -347,9 +347,7 @@ class CoverageEdges(unittest.TestCase):
             with patch.object(manager, "_retry_request", retry):
                 await manager._ensure_boundary()
             self.assertTrue(
-                urls[0].endswith(
-                    "/sites/tenant.sharepoint.com:/teams/COPILOTOIA-DECA"
-                )
+                urls[0].endswith("/sites/tenant.sharepoint.com:/teams/COPILOTOIA-DECA")
             )
             self.assertEqual(
                 manager.sharepoint_site_url,
@@ -404,11 +402,13 @@ class CoverageEdges(unittest.TestCase):
                         Response(payload={"id": "drive"}),
                     ]
                     if stage is not None:
-                        responses[stage].status_code = 403 if failure == "status" else 200
+                        responses[stage].status_code = (
+                            403 if failure == "status" else 200
+                        )
                         responses[stage]._payload = {}
                     pending = iter(responses)
 
-                    async def retry(method, url):
+                    async def retry(method, url, pending=pending):
                         return next(pending)
 
                     with (
@@ -417,7 +417,9 @@ class CoverageEdges(unittest.TestCase):
                             responses[stage or 0],
                             "json",
                             return_value=responses[stage or 0]._payload,
-                            side_effect=ValueError("invalid JSON") if failure == "json" else None,
+                            side_effect=ValueError("invalid JSON")
+                            if failure == "json"
+                            else None,
                         ),
                     ):
                         if error is None:
@@ -433,7 +435,9 @@ class CoverageEdges(unittest.TestCase):
     def test_constructor_browser_url_uses_site_root(self):
         with (
             patch.object(
-                SharepointManager, "_request", return_value=Response(payload={"id": "site"})
+                SharepointManager,
+                "_request",
+                return_value=Response(payload={"id": "site"}),
             ) as request,
             patch.object(SharepointManager, "_get_drive_id", return_value="drive"),
             patch.object(
@@ -443,8 +447,9 @@ class CoverageEdges(unittest.TestCase):
             for prefix in ("", "/:f:/r"):
                 for separator in ("sites", "teams"):
                     root = f"https://tke.sharepoint.com/{separator}/COPILOTOIA-DECA"
-                    with self.subTest(prefix=prefix, separator=separator):
-                        with SharepointManager(
+                    with (
+                        self.subTest(prefix=prefix, separator=separator),
+                        SharepointManager(
                             f"https://tke.sharepoint.com{prefix}/{separator}/"
                             "COPILOTOIA-DECA/Shared%20Documents/ARQUIVOS/"
                             "PROJETO%20IA/Qualidade?d=example",
@@ -452,20 +457,23 @@ class CoverageEdges(unittest.TestCase):
                                 get_token=lambda _scope: "token"
                             ),
                             tenant_id="tenant-id",
-                        ) as manager:
-                            self.assertEqual(manager.url, root)
-                            request.assert_called_with(
-                                "GET",
-                                "https://graph.microsoft.com/v1.0/sites/"
-                                f"tke.sharepoint.com:/{separator}/COPILOTOIA-DECA",
-                                headers={"Authorization": "Bearer token"},
-                                timeout=30,
-                            )
+                        ) as manager,
+                    ):
+                        self.assertEqual(manager.url, root)
+                        request.assert_called_with(
+                            "GET",
+                            "https://graph.microsoft.com/v1.0/sites/"
+                            f"tke.sharepoint.com:/{separator}/COPILOTOIA-DECA",
+                            headers={"Authorization": "Bearer token"},
+                            timeout=30,
+                        )
 
     def test_constructor_nested_teams_folder_uses_first_site_route(self):
         with (
             patch.object(
-                SharepointManager, "_request", return_value=Response(payload={"id": "site"})
+                SharepointManager,
+                "_request",
+                return_value=Response(payload={"id": "site"}),
             ) as request,
             patch.object(SharepointManager, "_get_drive_id", return_value="drive"),
             patch.object(
