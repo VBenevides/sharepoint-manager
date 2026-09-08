@@ -531,11 +531,20 @@ class AsyncSharepointManager:
             else:
                 self._drive_url_name = str(drive.get("name", ""))
 
-    def _validate_boundary(self, item: dict[str, Any]) -> None:
-        SharepointManagerBase._validate_item_boundary(self, item)
+    def _validate_boundary(
+        self, item: dict[str, Any], strict: bool | None = None
+    ) -> None:
+        if strict is None:
+            SharepointManagerBase._validate_item_boundary(self, item)
+        else:
+            SharepointManagerBase._validate_url_item(self, item, strict)
 
     async def _request_item(
-        self, endpoint: str, *, not_found: type[SPNotFoundError]
+        self,
+        endpoint: str,
+        *,
+        not_found: type[SPNotFoundError],
+        strict: bool | None = None,
     ) -> dict[str, Any]:
         response = await self._retry_request("GET", endpoint)
         try:
@@ -543,19 +552,28 @@ class AsyncSharepointManager:
             item = response.json()
         finally:
             await self._close_response(response)
-        self._validate_boundary(item)
+        self._validate_boundary(item, strict)
         return item
 
     async def _get_item_from_url(
-        self, url: str, *, not_found: type[SPNotFoundError] = SPNotFoundError
+        self,
+        url: str,
+        *,
+        not_found: type[SPNotFoundError] = SPNotFoundError,
+        strict: bool = False,
     ) -> dict[str, Any]:
-        SharepointManagerBase._validate_sharepoint_url(url)
-        await self._ensure_boundary()
-        relative_path = sharepoint_location_path(
-            url,
-            self.sharepoint_site_url,
-            self._drive_url_name or "",
+        SharepointManagerBase._validate_url_tenant(
+            self, url, self.sharepoint_site_url, strict
         )
+        await self._ensure_boundary()
+        try:
+            relative_path = sharepoint_location_path(
+                url,
+                self.sharepoint_site_url,
+                self._drive_url_name or "",
+            )
+        except SPUnauthorizedTarget:
+            relative_path = None
         if relative_path is not None:
             endpoint = f"{self._graph_base_url}/drives/{self._drive_id}/root"
             if relative_path:
@@ -564,6 +582,7 @@ class AsyncSharepointManager:
         return await self._request_item(
             f"https://{self.graph_host}/v1.0/shares/{self._share_id(url)}/driveItem",
             not_found=not_found,
+            strict=strict,
         )
 
     def _store_children(
@@ -571,9 +590,10 @@ class AsyncSharepointManager:
         values: list[dict[str, Any]],
         files: dict[str, SPFile],
         folders: dict[str, SPFolder],
+        strict: bool | None = None,
     ) -> None:
         for item in values:
-            self._validate_boundary(item)
+            self._validate_boundary(item, strict)
             if "file" in item:
                 file = SPFile.from_dict(item)
                 files[file.name] = file
@@ -582,7 +602,11 @@ class AsyncSharepointManager:
                 folders[child.name] = child
 
     async def _children(
-        self, folder: SPFolder, budget: dict[str, Any] | None = None
+        self,
+        folder: SPFolder,
+        budget: dict[str, Any] | None = None,
+        *,
+        strict: bool | None = None,
     ) -> tuple[dict[str, SPFile], dict[str, SPFolder]]:
         budget = budget or {
             "bytes": 0,
@@ -616,7 +640,7 @@ class AsyncSharepointManager:
             item_count += len(values)
             if item_count > self.policy.max_items:
                 raise SPValidationError("Graph item budget exceeded")
-            self._store_children(values, files, folders)
+            self._store_children(values, files, folders, strict)
             next_url = data.get("@odata.nextLink")
             if next_url is not None and not isinstance(next_url, str):
                 raise SPValidationError("Invalid Graph pagination link")
@@ -733,11 +757,15 @@ class AsyncSharepointManager:
             raise SPValidationError("Transfer byte budget exceeded")
         self._consume_budget(budget, byte_count=len(chunk))
 
-    async def download_file_from_url(self, url: str, destination: str) -> SPFile:
+    async def download_file_from_url(
+        self, url: str, destination: str, *, strict: bool = False
+    ) -> SPFile:
         """Download one approved SharePoint file to an explicit path.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         url : str
             SharePoint file URL.
         destination : str
@@ -749,7 +777,7 @@ class AsyncSharepointManager:
             Downloaded file metadata.
         """
         item = SPFile.from_dict(
-            await self._get_item_from_url(url, not_found=SPFileNotFound)
+            await self._get_item_from_url(url, not_found=SPFileNotFound, strict=strict)
         )
         os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
         budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
@@ -764,7 +792,9 @@ class AsyncSharepointManager:
         )
         return item
 
-    async def _create_folder(self, folder: SPFolder, name: str) -> SPFolder:
+    async def _create_folder(
+        self, folder: SPFolder, name: str, *, strict: bool | None = None
+    ) -> SPFolder:
         drive_id = folder.parent_reference.get("driveId")
         response = await self._retry_request(
             "POST",
@@ -778,7 +808,7 @@ class AsyncSharepointManager:
         )
         self._raise_for_status(response)
         payload = response.json()
-        self._validate_boundary(payload)
+        self._validate_boundary(payload, strict)
         return SPFolder.from_dict(payload)
 
     async def _upload_file(
@@ -851,12 +881,14 @@ class AsyncSharepointManager:
         )
 
     async def upload_file_to_folder_url(
-        self, folder_url: str, local_path: str
+        self, folder_url: str, local_path: str, *, strict: bool = False
     ) -> SPFile:
         """Upload one local file below an approved folder URL.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         folder_url : str
             Approved SharePoint folder URL.
         local_path : str
@@ -868,7 +900,9 @@ class AsyncSharepointManager:
             Uploaded file metadata.
         """
         folder = SPFolder.from_dict(
-            await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
+            await self._get_item_from_url(
+                folder_url, not_found=SPFolderNotFound, strict=strict
+            )
         )
         budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
         result = await self._upload_file(folder, local_path, budget)
@@ -881,21 +915,27 @@ class AsyncSharepointManager:
         )
         return result
 
-    async def download_folder_from_url(self, folder_url: str, destination: str) -> None:
+    async def download_folder_from_url(
+        self, folder_url: str, destination: str, *, strict: bool = False
+    ) -> None:
         """Recursively download an approved folder to a local path.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         folder_url : str
             Approved SharePoint folder URL.
         destination : str
             Local destination directory.
         """
         folder = SPFolder.from_dict(
-            await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
+            await self._get_item_from_url(
+                folder_url, not_found=SPFolderNotFound, strict=strict
+            )
         )
         budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
-        await self._download_folder(folder, destination, budget, depth=0)
+        await self._download_folder(folder, destination, budget, depth=0, strict=strict)
 
     async def _download_folder(
         self,
@@ -903,24 +943,28 @@ class AsyncSharepointManager:
         destination: str,
         budget: dict[str, Any],
         depth: int,
+        *,
+        strict: bool | None = None,
     ) -> None:
         self._consume_budget(budget, items=1, depth=depth)
         target = safe_join(destination, folder.name) if folder.name else destination
         os.makedirs(target, exist_ok=True)
-        files, folders = await self._children(folder, budget)
+        files, folders = await self._children(folder, budget, strict=strict)
         for file in files.values():
             self._consume_budget(budget, items=1)
             await self._download_item(file, safe_join(target, file.name), budget)
         for child in folders.values():
-            await self._download_folder(child, target, budget, depth + 1)
+            await self._download_folder(child, target, budget, depth + 1, strict=strict)
 
     async def upload_folder_to_folder_url(
-        self, folder_url: str, local_path: str
+        self, folder_url: str, local_path: str, *, strict: bool = False
     ) -> None:
         """Recursively upload a local folder below a SharePoint folder.
 
         Parameters
         ----------
+        strict : bool, default=False
+            Require the configured site; otherwise allow URLs within the tenant.
         folder_url : str
             Approved SharePoint destination folder URL.
         local_path : str
@@ -930,10 +974,12 @@ class AsyncSharepointManager:
         if not source.is_dir() or source.is_symlink():
             raise SPValidationError("Upload source must be a regular folder")
         folder = SPFolder.from_dict(
-            await self._get_item_from_url(folder_url, not_found=SPFolderNotFound)
+            await self._get_item_from_url(
+                folder_url, not_found=SPFolderNotFound, strict=strict
+            )
         )
         budget = {"bytes": 0, "items": 0, "pages": 0, "started": time.monotonic()}
-        await self._upload_folder(folder, source, budget, depth=0)
+        await self._upload_folder(folder, source, budget, depth=0, strict=strict)
 
     async def _upload_folder(
         self,
@@ -941,16 +987,20 @@ class AsyncSharepointManager:
         source: Path,
         budget: dict[str, Any],
         depth: int,
+        *,
+        strict: bool | None = None,
     ) -> None:
         self._consume_budget(budget, items=1, depth=depth)
-        child = await self._create_folder(target, source.name)
+        child = await self._create_folder(target, source.name, strict=strict)
         for entry in sorted(source.iterdir(), key=lambda value: value.name):
             if entry.is_symlink():
                 raise SPValidationError("Symlinks are not allowed in upload trees")
             if entry.is_file():
                 await self._upload_file(child, str(entry), budget)
             elif entry.is_dir():
-                await self._upload_folder(child, entry, budget, depth + 1)
+                await self._upload_folder(
+                    child, entry, budget, depth + 1, strict=strict
+                )
 
     async def close(self) -> None:
         """Close the owned HTTP client and clear credential state."""

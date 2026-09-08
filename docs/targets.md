@@ -8,7 +8,7 @@ are operating targets, not a promise of Graph service capacity.
 | Single file | 10 GiB maximum by default; larger files require an explicit policy |
 | One tree | 100 GiB, 100,000 items, depth 64, and 1,000 pages by default |
 | Concurrency | Bounded by `OperationPolicy.max_concurrency` per manager; default is one |
-| Tenants | One configured site/drive boundary per manager; create separate managers for separate tenants |
+| Tenants | URL methods are tenant-scoped by default; `strict=True` requires the configured site. Path/object workflows retain the configured site/drive boundary; create separate managers for separate tenants |
 | Request recovery | Retry budget of 5 safe-method attempts; `Retry-After` capped at 60 seconds; operation deadline 1 hour |
 | Local recovery | Atomic downloads retain the previous destination; ambiguous uploads expose session state for reconciliation |
 | Latency target | Measure non-transfer Graph operations at p95 ≤ 1.5 seconds on a controlled test tenant before increasing concurrency |

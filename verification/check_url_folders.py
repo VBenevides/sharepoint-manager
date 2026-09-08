@@ -70,12 +70,30 @@ def _configure_manager():
             next_url = manager._graph_base_url + "/v1.0/children?p=2"
             return Response(
                 {
-                    "value": [{"id": "file-a", "name": _FILE_NAME, "file": {}}],
+                    "value": [
+                        {
+                            "id": "file-a",
+                            "name": _FILE_NAME,
+                            "file": {},
+                            "parentReference": folder["parentReference"],
+                        }
+                    ],
                     "@odata.nextLink": next_url,
                 }
             )
         if url.endswith("/children?p=2"):
-            return Response({"value": [{"id": "sub-a", "name": "Sub", "folder": {}}]})
+            return Response(
+                {
+                    "value": [
+                        {
+                            "id": "sub-a",
+                            "name": "Sub",
+                            "folder": {},
+                            "parentReference": folder["parentReference"],
+                        }
+                    ]
+                }
+            )
         if method == "POST" and url.endswith(_CHILDREN_PATH):
             return Response(
                 {
@@ -148,7 +166,18 @@ def _check_deletions(manager, share_url, folder):
     manager._request = lambda method, url, **kwargs: (
         Response(folder)
         if _SHARES_PATH in url or _DRIVE_ROOT_PATH in url
-        else Response({"value": [{"id": "file-a", "name": _FILE_NAME, "file": {}}]})
+        else Response(
+            {
+                "value": [
+                    {
+                        "id": "file-a",
+                        "name": _FILE_NAME,
+                        "file": {},
+                        "parentReference": folder["parentReference"],
+                    }
+                ]
+            }
+        )
     )
     try:
         manager.delete_folder_from_url(share_url)
@@ -188,6 +217,7 @@ def _check_deletions(manager, share_url, folder):
 
 
 def _check_boundaries(manager, share_url, folder):
+    share_url = share_url.replace("Shared%20Documents", "Other")
     manager._request = lambda method, url, **kwargs: Response(
         {**folder, "parentReference": {"siteId": "site-b", "driveId": "drive-a"}}
     )
@@ -196,19 +226,41 @@ def _check_boundaries(manager, share_url, folder):
         "https://tenant.sharepoint.com/:f:/s/demo/Eabc",
         "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc",
     ):
+        assert manager.get_folder_metadata_from_url(url).id == "folder-a"
         try:
-            manager.get_folder_metadata_from_url(url)
+            manager.get_folder_metadata_from_url(url, strict=True)
         except SPUnauthorizedTarget:
             pass
         else:
             raise AssertionError("off-boundary folder accepted")
+
+    manager._request = lambda method, url, **kwargs: Response(
+        {**folder, "parentReference": {"siteId": "site-a", "driveId": "drive-b"}}
+    )
+    assert manager.get_folder_metadata_from_url(share_url).id == "folder-a"
+    assert manager.get_folder_metadata_from_url(share_url, strict=True).id == "folder-a"
+
+    def unexpected_request(*args, **kwargs):
+        raise AssertionError("cross-tenant URL reached Graph")
+
+    manager._request = unexpected_request
+    for strict in (False, True):
+        try:
+            manager.get_folder_metadata_from_url(
+                share_url.replace("tenant.sharepoint.com", "other.sharepoint.com"),
+                strict=strict,
+            )
+        except SPUnauthorizedTarget:
+            pass
+        else:
+            raise AssertionError("cross-tenant URL accepted")
 
     file_obj = SPFile(
         id="file-a",
         name=_FILE_NAME,
         parent_reference={"siteId": "site-a", "driveId": "drive-a"},
     )
-    manager.get_file_metadata_from_url = lambda url: file_obj
+    manager.get_file_metadata_from_url = lambda url, **kwargs: file_obj
     manager._request = lambda method, url, **kwargs: Response(
         {
             "value": [
@@ -227,18 +279,18 @@ def _check_boundaries(manager, share_url, folder):
 
 def _check_transfer_adapters(manager, share_url, file_obj):
     transfer_calls = []
-    manager.get_folder_metadata_from_url = lambda url: SPFolder(
+    manager.get_folder_metadata_from_url = lambda url, **kwargs: SPFolder(
         id="folder-a",
         name="Folder #1",
         parent_reference={"siteId": "site-a", "driveId": "drive-a"},
     )
-    manager.upload_file = lambda path, **kwargs: (
+    manager._upload_file_scoped = lambda path, **kwargs: (
         transfer_calls.append(("upload_file", path, kwargs)) or file_obj
     )
-    manager.upload_folder = lambda path, **kwargs: transfer_calls.append(
+    manager._upload_folder_scoped = lambda path, **kwargs: transfer_calls.append(
         ("upload_folder", path, kwargs)
     )
-    manager.download_folder = lambda path, **kwargs: transfer_calls.append(
+    manager._download_folder_scoped = lambda path, **kwargs: transfer_calls.append(
         ("download_folder", path, kwargs)
     )
     with tempfile.TemporaryDirectory() as directory:

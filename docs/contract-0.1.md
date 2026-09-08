@@ -42,8 +42,11 @@ replacements.
 
 ## Safety and operations
 
-- Site, drive, Graph-host, SharePoint-host, and capability-URL boundaries are
-  validated before use.
+- URL methods enforce the configured tenant by default (`strict=False`). Pass
+  `strict=True` to require the configured site; other drives/libraries in that
+  site remain allowed. Cross-tenant URLs are rejected before Graph access.
+- Non-URL path/object workflows retain site/drive boundaries. Graph-host,
+  SharePoint-host, and capability-URL boundaries are validated before use.
 - Downloads use temporary sibling files, size/hash validation, and atomic
   replacement. Uploads use bounded retries and integrity-aware transfer
   handling.

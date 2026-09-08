@@ -15,9 +15,12 @@ MSAL uses it only for the initial token request, then obtains tokens silently
 from its in-memory cache. A cache miss requires the caller to provide the
 credentials again.
 
-The package applies HTTPS and host validation, configured SharePoint
-site/drive boundaries, finite transfer and traversal limits, safe archive/path
-handling, typed redacted errors, and privacy-safe normal logging. Consumers
+The package applies HTTPS and host validation, tenant validation for URL
+methods, configured SharePoint site/drive boundaries for path and object
+workflows, finite transfer and traversal limits, safe archive/path handling,
+typed redacted errors, and privacy-safe normal logging. URL methods accept
+same-tenant targets when the credential can reach them; use `strict=True` to
+require the configured site. Consumers
 must still restrict Entra grants, protect client secrets, control outbound
 proxies/DNS, and treat Graph capability URLs as short-lived secrets.
 

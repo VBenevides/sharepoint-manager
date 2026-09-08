@@ -49,9 +49,11 @@ def manager_for(responses):
 
 def main() -> None:
     assert "_upload_source_resumable" in inspect.getsource(
-        SharepointManager.upload_file
+        SharepointManager._upload_file_scoped
     )
-    assert "createUploadSession" not in inspect.getsource(SharepointManager.upload_file)
+    assert "createUploadSession" not in inspect.getsource(
+        SharepointManager._upload_file_scoped
+    )
     assert "_upload_source_resumable" in inspect.getsource(
         SharepointManager.upload_file_to_url
     )

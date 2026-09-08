@@ -469,14 +469,37 @@ async def _check_folder_downloads(
         raise AssertionError("async pagination page budget was ignored")
     manager.policy = saved_policy
 
+    foreign_path = Path(directory) / "foreign.bin"
+    await manager.download_file_from_url(foreign_url, str(foreign_path))
+    assert foreign_path.read_bytes() == b"payload"
+    foreign_path.unlink()
+    await manager.download_file_from_url(foreign_url, str(foreign_path), strict=True)
+    assert foreign_path.read_bytes() == b"payload"
+    foreign_item = client.items[manager._share_id(foreign_url)]
+    foreign_item["parentReference"]["siteId"] = "other-site"
     try:
         await manager.download_file_from_url(
-            foreign_url, str(Path(directory) / "foreign.bin")
+            foreign_url, str(foreign_path), strict=True
         )
     except SPUnauthorizedTarget:
         pass
     else:
-        raise AssertionError("async cross-drive item was accepted")
+        raise AssertionError("async off-site item was accepted with strict=True")
+    foreign_item["parentReference"]["siteId"] = "site"
+
+    requests_before = len(client.requests)
+    for strict in (False, True):
+        try:
+            await manager.download_file_from_url(
+                foreign_url.replace("tenant.sharepoint.com", "other.sharepoint.com"),
+                str(foreign_path),
+                strict=strict,
+            )
+        except SPUnauthorizedTarget:
+            pass
+        else:
+            raise AssertionError("async cross-tenant URL was accepted")
+    assert len(client.requests) == requests_before
 
     oversized_url = f"{_DEMO_SITE_URL}/Documents/oversized.bin"
     client.items[manager._share_id(oversized_url)] = {

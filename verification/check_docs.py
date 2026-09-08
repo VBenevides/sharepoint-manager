@@ -10,6 +10,7 @@ from pathlib import Path
 _PUBLIC_CLASSES = {
     "AsyncSharepointManager": "sharepoint_manager/async_core.py",
     "SharepointManager": "sharepoint_manager/core.py",
+    "SharepointManagerPool": "sharepoint_manager/pool.py",
     "TokenProvider": "sharepoint_manager/dataclasses.py",
     "OperationPolicy": "sharepoint_manager/dataclasses.py",
     "ClientCredential": "sharepoint_manager/dataclasses.py",
