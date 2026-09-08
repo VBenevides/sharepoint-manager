@@ -503,18 +503,24 @@ class AsyncSharepointManager:
                 "GET",
                 f"{self._graph_base_url}/sites/{parsed.hostname}:{site_path}",
             )
-            self._raise_for_status(response, not_found=SPFolderNotFound)
-            site_id = response.json().get("id")
-            if not site_id:
-                raise SPUnauthorizedTarget("Configured SharePoint site has no ID")
+            try:
+                self._raise_for_status(response, not_found=SPFolderNotFound)
+                site_id = response.json().get("id")
+                if not site_id:
+                    raise SPUnauthorizedTarget("Configured SharePoint site has no ID")
+            finally:
+                await self._close_response(response)
             response = await self._retry_request(
                 "GET", f"{self._graph_base_url}/sites/{site_id}/drive"
             )
-            self._raise_for_status(response, not_found=SPFolderNotFound)
-            drive = response.json()
-            drive_id = drive.get("id")
-            if not drive_id:
-                raise SPUnauthorizedTarget("Configured SharePoint drive has no ID")
+            try:
+                self._raise_for_status(response, not_found=SPFolderNotFound)
+                drive = response.json()
+                drive_id = drive.get("id")
+                if not drive_id:
+                    raise SPUnauthorizedTarget("Configured SharePoint drive has no ID")
+            finally:
+                await self._close_response(response)
             self._site_id = site_id
             self._drive_id = drive_id
             web_url = drive.get("webUrl")

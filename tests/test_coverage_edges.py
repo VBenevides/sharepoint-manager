@@ -358,6 +358,55 @@ class CoverageEdges(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_async_boundary_responses_close(self):
+        async def exercise():
+            for stage, failure, error in (
+                (None, None, None),
+                (0, "status", SPAuthorizationError),
+                (0, "json", ValueError),
+                (0, "id", SPUnauthorizedTarget),
+                (1, "status", SPAuthorizationError),
+                (1, "json", ValueError),
+                (1, "id", SPUnauthorizedTarget),
+            ):
+                with self.subTest(stage=stage, failure=failure):
+                    manager = AsyncSharepointManager(
+                        "https://tenant.sharepoint.com/sites/demo",
+                        token_provider=types.SimpleNamespace(
+                            get_token=lambda _scope: "token"
+                        ),
+                    )
+                    responses = [
+                        Response(payload={"id": "site"}),
+                        Response(payload={"id": "drive"}),
+                    ]
+                    if stage is not None:
+                        responses[stage].status_code = 403 if failure == "status" else 200
+                        responses[stage]._payload = {}
+                    pending = iter(responses)
+
+                    async def retry(method, url):
+                        return next(pending)
+
+                    with (
+                        patch.object(manager, "_retry_request", retry),
+                        patch.object(
+                            responses[stage or 0],
+                            "json",
+                            return_value=responses[stage or 0]._payload,
+                            side_effect=ValueError("invalid JSON") if failure == "json" else None,
+                        ),
+                    ):
+                        if error is None:
+                            await manager._ensure_boundary()
+                        else:
+                            with self.assertRaises(error):
+                                await manager._ensure_boundary()
+                    self.assertTrue(responses[0].closed)
+                    self.assertEqual(responses[1].closed, stage != 0)
+
+        asyncio.run(exercise())
+
     def test_constructor_browser_url_uses_site_root(self):
         with (
             patch.object(
