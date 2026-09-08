@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.5] - 2026-09-08
+
+### Features
+
+- Added `SharepointManagerPool` for thread-safe lazy caching of one manager per
+  SharePoint site, shared credentials and document-library configuration, and
+  lifecycle cleanup; exported it with `get_sharepoint_manager`.
+
+### Bugfixes
+
+- Allowed URL-targeted operations to resolve same-tenant resources when the
+  credential can access them, with `strict=True` available to require the
+  configured site while allowing other drives or libraries in that site.
+- Routed URL operations through the resolved drive while preserving site/drive
+  boundaries for path and object workflows.
+
+### Other
+
+- Added offline pool and URL-boundary verification coverage and updated the
+  security and contract documentation.
+
 ## [0.1.4] - 2026-09-08
 
 ### Bugfixes
