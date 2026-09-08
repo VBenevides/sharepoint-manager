@@ -109,7 +109,7 @@ def sharepoint_location_path(
         return None
 
     relative = path[len(site_path) :].strip("/")
-    drive_name = unquote(drive_url_name).strip("/")
+    drive_name = drive_url_name.strip("/")
     if relative == drive_name:
         return ""
     prefix = f"{drive_name}/"
