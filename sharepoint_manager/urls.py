@@ -2,7 +2,7 @@
 
 import base64
 import re
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .exceptions import SPUnauthorizedTarget, SPValidationError
 
@@ -97,6 +97,10 @@ def sharepoint_location_path(
     redirect = _LOCATION_REDIRECT_RE.match(path)
     if redirect:
         path = redirect.group("path").rstrip("/") or "/"
+    if path.endswith("/Forms/AllItems.aspx"):
+        target = parse_qs(parsed.query).get("id", [""])[0]
+        if target:
+            path = target.rstrip("/") or "/"
     if path != site_path and not path.startswith(f"{site_path}/"):
         return None
 

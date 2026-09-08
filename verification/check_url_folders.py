@@ -112,6 +112,14 @@ def _check_folder_metadata(manager, share_url, calls):
     redirect_url = "https://tenant.sharepoint.com/:f:/r/sites/site/Shared%20Documents/Folder%20%231"
     assert manager.get_folder_metadata_from_url(redirect_url).id == "folder-a"
     assert any("/drives/drive-a/root:/Folder%20%231" in url for _, url, _ in calls)
+    browser_url = (
+        "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Forms/AllItems.aspx"
+        "?id=%2Fsites%2Fsite%2FShared%20Documents%2FFolder%20%231"
+    )
+    assert manager.get_folder_metadata_from_url(browser_url).id == "folder-a"
+    assert calls[-1][1] == (
+        manager._graph_base_url + "/drives/drive-a/root:/Folder%20%231"
+    )
     files, folders = manager.list_folder_from_url(share_url)
     assert set(files) == {_FILE_NAME} and set(folders) == {"Sub"}
     created = manager.create_folder_from_url(share_url, "New #1")
