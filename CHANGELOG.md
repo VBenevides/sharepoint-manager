@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.4] - 2026-09-08
+
+### Bugfixes
+
+- Normalized synchronous and asynchronous SharePoint browser URLs to their
+  actual site roots, including nested `/sites/` and `/teams/` paths and encoded
+  site names.
+- Resolved browser folder-view targets, standard sharing links, semicolon path
+  segments, and literal percent escapes in document-library names without
+  weakening site or drive boundary checks.
+- Corrected asynchronous resumable-upload filename encoding and closed site and
+  drive discovery responses on success and failure.
+
+### Other
+
+- Added regression coverage for URL parsing, async boundary discovery, upload
+  encoding, response cleanup, and boundary enforcement.
+
 ## [0.1.3] - 2026-09-04
 
 ### Bugfixes
