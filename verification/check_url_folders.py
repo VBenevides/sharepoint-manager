@@ -17,6 +17,7 @@ from sharepoint_manager.exceptions import (
     SPUnauthorizedTarget,
     SPValidationError,
 )
+from sharepoint_manager.urls import share_id
 
 _SHARES_PATH = "/shares/"
 _DRIVE_ROOT_PATH = "/drives/drive-a/root:/"
@@ -107,8 +108,15 @@ def _configure_manager():
 def _check_folder_metadata(manager, share_url, calls):
     metadata = manager.get_folder_metadata_from_url(share_url)
     assert metadata.id == "folder-a"
-    sharing_url = "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc"
-    assert manager.get_folder_metadata_from_url(sharing_url).id == "folder-a"
+    for sharing_url in (
+        "https://tenant.sharepoint.com/:f:/s/demo/Eabc",
+        "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc",
+    ):
+        assert manager.get_folder_metadata_from_url(sharing_url).id == "folder-a"
+        assert calls[-1][:2] == (
+            "GET",
+            f"{manager._graph_base_url}/shares/{share_id(sharing_url)}/driveItem",
+        )
     redirect_url = "https://tenant.sharepoint.com/:f:/r/sites/site/Shared%20Documents/Folder%20%231"
     assert manager.get_folder_metadata_from_url(redirect_url).id == "folder-a"
     assert any("/drives/drive-a/root:/Folder%20%231" in url for _, url, _ in calls)
@@ -183,12 +191,17 @@ def _check_boundaries(manager, share_url, folder):
     manager._request = lambda method, url, **kwargs: Response(
         {**folder, "parentReference": {"siteId": "site-b", "driveId": "drive-a"}}
     )
-    try:
-        manager.get_folder_metadata_from_url(share_url)
-    except SPUnauthorizedTarget:
-        pass
-    else:
-        raise AssertionError("off-boundary folder accepted")
+    for url in (
+        share_url,
+        "https://tenant.sharepoint.com/:f:/s/demo/Eabc",
+        "https://tenant.sharepoint.com/:f:/s/sites/site/Eabc",
+    ):
+        try:
+            manager.get_folder_metadata_from_url(url)
+        except SPUnauthorizedTarget:
+            pass
+        else:
+            raise AssertionError("off-boundary folder accepted")
 
     file_obj = SPFile(
         id="file-a",

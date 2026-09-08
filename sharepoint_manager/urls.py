@@ -74,7 +74,11 @@ def validate_sharepoint_url(url: str):
         or parsed.fragment
         or parsed.port not in (None, 443)
         or not any(host.endswith(suffix) for suffix in SHAREPOINT_SUFFIXES)
-        or not ("/sites/" in parsed.path or "/teams/" in parsed.path)
+        or not (
+            "/sites/" in parsed.path
+            or "/teams/" in parsed.path
+            or re.fullmatch(r"/:[^/]+:/s/[^/]+/[^/]+", parsed.path)
+        )
     ):
         raise SPValidationError("SharePoint URLs must use an approved HTTPS site host")
     return parsed
