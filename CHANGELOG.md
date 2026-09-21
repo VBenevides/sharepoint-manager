@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.6] - 2026-09-20
+
+### Bugfixes
+
+- Include missing edge case in tests
+
 ## [0.1.5] - 2026-09-08
 
 ### Features
