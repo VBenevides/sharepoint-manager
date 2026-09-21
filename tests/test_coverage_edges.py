@@ -331,7 +331,7 @@ class CoverageEdges(unittest.TestCase):
     def test_async_boundary_browser_url_uses_site_root(self):
         async def exercise():
             manager = AsyncSharepointManager(
-                "https://tenant.sharepoint.com/:f:/r/teams/COPILOTOIA-DECA/"
+                "https://tenant.sharepoint.com/:f:/r/teams/example-site/"
                 "Shared%20Documents/Folder?d=example",
                 token_provider=types.SimpleNamespace(get_token=lambda _scope: "token"),
             )
@@ -347,11 +347,11 @@ class CoverageEdges(unittest.TestCase):
             with patch.object(manager, "_retry_request", retry):
                 await manager._ensure_boundary()
             self.assertTrue(
-                urls[0].endswith("/sites/tenant.sharepoint.com:/teams/COPILOTOIA-DECA")
+                urls[0].endswith("/sites/tenant.sharepoint.com:/teams/example-site")
             )
             self.assertEqual(
                 manager.sharepoint_site_url,
-                "https://tenant.sharepoint.com/teams/COPILOTOIA-DECA",
+                "https://tenant.sharepoint.com/teams/example-site",
             )
 
         asyncio.run(exercise())
@@ -446,24 +446,25 @@ class CoverageEdges(unittest.TestCase):
         ):
             for prefix in ("", "/:f:/r"):
                 for separator in ("sites", "teams"):
-                    root = f"https://tke.sharepoint.com/{separator}/COPILOTOIA-DECA"
+                    root = f"https://tenant.sharepoint.com/{separator}/example-site"
                     with (
                         self.subTest(prefix=prefix, separator=separator),
                         SharepointManager(
-                            f"https://tke.sharepoint.com{prefix}/{separator}/"
-                            "COPILOTOIA-DECA/Shared%20Documents/ARQUIVOS/"
-                            "PROJETO%20IA/Qualidade?d=example",
+                            f"https://tenant.sharepoint.com{prefix}/{separator}/"
+                            "example-site/Shared%20Documents/Files/"
+                            "Project/File%201?d=example",
                             token_provider=types.SimpleNamespace(
                                 get_token=lambda _scope: "token"
                             ),
                             tenant_id="tenant-id",
                         ) as manager,
                     ):
+                        self.assertEqual(manager.site_name, "example-site")
                         self.assertEqual(manager.url, root)
                         request.assert_called_with(
                             "GET",
                             "https://graph.microsoft.com/v1.0/sites/"
-                            f"tke.sharepoint.com:/{separator}/COPILOTOIA-DECA",
+                            f"tenant.sharepoint.com:/{separator}/example-site",
                             headers={"Authorization": "Bearer token"},
                             timeout=30,
                         )
