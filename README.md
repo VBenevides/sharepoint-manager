@@ -107,11 +107,13 @@ or another provider, inject a `TokenProvider` with `get_token(scope)`.
   `iter_folder_delta()` yields `SPDeltaPage` values containing files, folders,
   tombstones, and checkpoint links. Persist `delta_link` in the caller's store.
 - Approved SharePoint browser location URLs and sharing links support folder
-  metadata, listing, creation, empty deletion, normalized permissions, and file
-  transfers. URL methods enforce the configured tenant by default
-  (`strict=False`); pass `strict=True` to require the configured site, while
-  allowing other drives/libraries in that site. Cross-tenant URLs are rejected
-  before Graph access. Non-URL path/object workflows retain site/drive boundaries.
+  metadata, listing, materialized delta reads, creation, empty deletion,
+  normalized permissions, and file transfers. URL methods enforce the configured
+  tenant by default (`strict=False`) when that parameter is supported; pass
+  `strict=True` to require the configured site. The restored
+  `get_folder_delta_from_url()` method keeps its historical signature and uses
+  the default tenant boundary. Cross-tenant URLs are rejected before Graph
+  access. Non-URL path/object workflows retain site/drive boundaries.
 
 ## Limits, retries, and errors
 
