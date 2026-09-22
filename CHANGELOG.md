@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.7] - 2026-09-22
+
+### Features
+
+- Restored `SharepointManager.get_folder_delta_from_url()` for materialized
+  file, folder, tombstone, and checkpoint results from absolute folder URLs.
+
+### Other
+
+- Added regression coverage and updated the URL, contract, and migration
+  documentation.
+
 ## [0.1.6] - 2026-09-20
 
 ### Bugfixes
