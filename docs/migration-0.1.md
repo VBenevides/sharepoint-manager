@@ -5,9 +5,10 @@ the package does not provide compatibility aliases or a deprecation window.
 
 - Replace `set_folder()` and `cwd()` with an explicit path, URL, or resolved
   `SPFolder` passed to each operation.
-- Replace `get_folder_delta()` and `get_folder_delta_from_url()` with
-  `iter_folder_delta()`. Persist each emitted checkpoint and resume with its
-  `delta_link`; do not materialize an unbounded delta result in the client.
+- Replace `get_folder_delta()` with `iter_folder_delta()`. Persist each emitted
+  checkpoint and resume with its `delta_link`; do not materialize an unbounded
+  delta result in the client. `get_folder_delta_from_url()` is available when a
+  materialized URL-based compatibility result is required.
 - Use `upload_file_to_folder_url()`, `upload_folder_to_folder_url()`, and
   `download_folder_from_url()` for URL-targeted transfers.
 - Use `ClientCredential` for app registration and

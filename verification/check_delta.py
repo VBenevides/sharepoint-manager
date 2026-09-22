@@ -59,6 +59,46 @@ def main() -> None:
         ("gone", {"state": "deleted"})
     ]
 
+    manager._graph_base_url = "https://graph.microsoft.com/v1.0"
+    manager._get_drive_item_from_url = lambda url: {
+        "id": "folder-a",
+        "folder": {},
+        "parentReference": {"driveId": "drive-a"},
+    }
+    folder_delta = manager._graph_base_url + "/drives/drive-a/items/folder-a/delta"
+    folder_delta_page = folder_delta + "?page=2"
+    pages[folder_delta] = Response(
+        {
+            "value": [{"id": "folder-file", "name": "a.txt", "file": {}}],
+            "@odata.nextLink": folder_delta_page,
+        }
+    )
+    pages[folder_delta_page] = Response(
+        {
+            "value": [{"id": "subfolder", "name": "Sub", "folder": {}}],
+            "@odata.deltaLink": folder_delta + "?token=folder-done",
+        }
+    )
+    manager._request = lambda method, url, **kwargs: pages[url]
+    delta_link, files, folders, deleted = manager.get_folder_delta_from_url(
+        "https://tenant.sharepoint.com/sites/demo/Documents/Folder"
+    )
+    assert delta_link.endswith("token=folder-done")
+    assert [item.id for item in files] == ["folder-file"]
+    assert [item.id for item in folders] == ["subfolder"]
+    assert not deleted
+
+    def fail_url_resolution(url):
+        raise AssertionError(f"URL should be ignored: {url}")
+
+    manager._get_drive_item_from_url = fail_url_resolution
+    delta_link, files, folders, deleted = manager.get_folder_delta_from_url(
+        "ignored", delta_link="https://graph.microsoft.com/v1.0/delta"
+    )
+    assert delta_link.endswith("token=done")
+    assert [item.id for item in files] == ["f1"]
+    assert not folders and len(deleted) == 1
+
 
 if __name__ == "__main__":
     main()

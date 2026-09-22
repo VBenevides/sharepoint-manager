@@ -42,9 +42,12 @@ replacements.
 
 ## Safety and operations
 
-- URL methods enforce the configured tenant by default (`strict=False`). Pass
-  `strict=True` to require the configured site; other drives/libraries in that
-  site remain allowed. Cross-tenant URLs are rejected before Graph access.
+- URL methods that expose `strict` enforce the configured tenant by default
+  (`strict=False`). Pass `strict=True` to require the configured site; other
+  drives/libraries in that site remain allowed. The restored
+  `get_folder_delta_from_url()` method keeps its historical signature and uses
+  the default tenant boundary. Cross-tenant URLs are rejected before Graph
+  access.
 - Non-URL path/object workflows retain site/drive boundaries. Graph-host,
   SharePoint-host, and capability-URL boundaries are validated before use.
 - Downloads use temporary sibling files, size/hash validation, and atomic

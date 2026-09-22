@@ -897,6 +897,20 @@ class SharepointManagerBase:
                 tuple(files), tuple(folders), tuple(deleted), next_page, checkpoint
             )
 
+    def _consume_delta(
+        self, start_url: str
+    ) -> tuple[str | None, list[SPFile], list[SPFolder], list[SPDeletedItem]]:
+        files: list[SPFile] = []
+        folders: list[SPFolder] = []
+        deleted: list[SPDeletedItem] = []
+        latest_delta_link: str | None = None
+        for page in self.iter_folder_delta(delta_link=start_url):
+            files.extend(page.files)
+            folders.extend(page.folders)
+            deleted.extend(page.deleted)
+            latest_delta_link = page.delta_link or latest_delta_link
+        return latest_delta_link, files, folders, deleted
+
 
 class SharepointManager(SharepointManagerBase):
     """
@@ -1175,6 +1189,51 @@ class SharepointManager(SharepointManagerBase):
             response.close()
         self._validate_url_item(item, strict)
         return item
+
+    def get_folder_delta_from_url(
+        self,
+        url: str,
+        delta_link: str | None = None,
+    ) -> tuple[str | None, list[SPFile], list[SPFolder], list[SPDeletedItem]]:
+        """
+        Return materialized delta results for an absolute SharePoint folder URL.
+
+
+        Parameters
+        ----------
+        url : str
+            Absolute SharePoint folder URL.
+        delta_link : str, optional
+            Existing Microsoft Graph delta link. If provided, ``url`` is ignored.
+
+
+        Returns
+        -------
+        tuple[str | None, list[SPFile], list[SPFolder], list[SPDeletedItem]]
+            The latest delta link, changed files, changed folders, and tombstones.
+
+
+        Examples
+        --------
+        >>> manager = SharepointManager(...)
+        >>> delta_link, files, folders, deleted = manager.get_folder_delta_from_url(
+        ...     "https://tenant.sharepoint.com/sites/site/Shared%20Documents/Folder"
+        ... )
+        """
+        if delta_link is not None:
+            return self._consume_delta(delta_link)
+
+        folder_item = self._get_drive_item_from_url(url)
+        if "folder" not in folder_item and "root" not in folder_item:
+            raise SPFolderNotFound("SP folder not found")
+        parent_reference = folder_item.get("parentReference", {})
+        drive_id = parent_reference.get("driveId")
+        item_id = folder_item.get("id")
+        if not drive_id or not item_id:
+            raise RuntimeError("Folder metadata is missing driveId or id")
+
+        start_url = f"{self._graph_base_url}/drives/{drive_id}/items/{item_id}/delta"
+        return self._consume_delta(start_url)
 
     def get_file_metadata_from_url(self, url: str, *, strict: bool = False) -> SPFile:
         """
